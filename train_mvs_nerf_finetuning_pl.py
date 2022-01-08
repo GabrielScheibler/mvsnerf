@@ -1,5 +1,6 @@
 from opt import config_parser
 from torch.utils.data import DataLoader
+from pyhocon import ConfigFactory
 
 from data import dataset_dict
 
@@ -39,8 +40,16 @@ class MVSSystem(LightningModule):
 
         self.loss = SL1Loss()
 
+        # Configuration
+        self.neus_conf_path = args.neus_conf_path
+        f = open(self.neus_conf_path)
+        neus_conf_text = f.read()
+        f.close()
+        self.neus_conf = ConfigFactory.parse_string(neus_conf_text)
+        neus_conf = self.neus_conf
+
         # Create nerf model
-        self.render_kwargs_train, self.render_kwargs_test, start, self.grad_vars = create_nerf_mvs(args, use_mvs=True, dir_embedder=False, pts_embedder=True)
+        self.render_kwargs_train, self.render_kwargs_test, start, self.grad_vars = create_nerf_mvs(args, neus_conf, use_mvs=True, dir_embedder=False, pts_embedder=True)
         filter_keys(self.render_kwargs_train)
 
         # Create mvs model

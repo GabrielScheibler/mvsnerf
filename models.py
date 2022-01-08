@@ -5,6 +5,8 @@ from utils import *
 from utils import homo_warp
 from inplace_abn import InPlaceABN
 from renderer import run_network_mvs
+from neus_fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
+from neus_renderer import NeuSRenderer
 
 
 def weights_init(m):
@@ -537,8 +539,75 @@ class Renderer_linear(nn.Module):
 
         return outputs
 
+#TODO implement NeuS model
+class Renderer_NeuS(nn.Module):
+    def __init__(self, neus_conf):
+        """
+        """
+        super(Renderer_NeuS, self).__init__()
+
+        self.conf = neus_conf
+
+        self.nerf_outside = NeRF(**self.conf['model.nerf']).to(self.device)
+        self.sdf_network = SDFNetwork(**self.conf['model.sdf_network']).to(self.device)
+        self.deviation_network = SingleVarianceNetwork(**self.conf['model.variance_network']).to(self.device)
+        self.color_network = RenderingNetwork(**self.conf['model.rendering_network']).to(self.device)
+
+        self.renderer = NeuSRenderer(self.nerf_outside,
+                                     self.sdf_network,
+                                     self.deviation_network,
+                                     self.color_network,
+                                     **self.conf['model.neus_renderer'])
+
+
+    def forward_alpha(self,x):
+        dim = x.shape[-1]
+        input_pts, input_feats = torch.split(x, [self.in_ch_pts, self.in_ch_feat], dim=-1)
+
+        h = input_pts
+        bias = self.pts_bias(input_feats)
+        for i, l in enumerate(self.pts_linears):
+            h = self.pts_linears[i](h) + bias
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([input_pts, h], -1)
+
+        alpha = self.alpha_linear(h)
+        return alpha
+
+    def forward(self, x):
+        dim = x.shape[-1]
+        in_ch_feat = dim-self.in_ch_pts-self.in_ch_views
+        input_pts, input_feats, input_views = torch.split(x, [self.in_ch_pts, in_ch_feat, self.in_ch_views], dim=-1)
+
+        h = input_pts
+        bias = self.pts_bias(input_feats) #if in_ch_feat == self.in_ch_feat else  input_feats
+        for i, l in enumerate(self.pts_linears):
+            h = self.pts_linears[i](h) + bias
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([input_pts, h], -1)
+
+
+        if self.use_viewdirs:
+            alpha = torch.relu(self.alpha_linear(h))
+            feature = self.feature_linear(h)
+            h = torch.cat([feature, input_views], -1)
+
+            for i, l in enumerate(self.views_linears):
+                h = self.views_linears[i](h)
+                h = F.relu(h)
+
+            rgb = torch.sigmoid(self.rgb_linear(h))
+            outputs = torch.cat([rgb, alpha], -1)
+        else:
+            outputs = self.output_linear(h)
+
+        return outputs
+
+
 class MVSNeRF(nn.Module):
-    def __init__(self, D=8, W=256, input_ch_pts=3, input_ch_views=3, input_ch_feat=8, skips=[4], net_type='v2'):
+    def __init__(self, D=8, W=256, input_ch_pts=3, input_ch_views=3, input_ch_feat=8, skips=[4], net_type='v2', neus_conf=None):
         """
         """
         super(MVSNeRF, self).__init__()
@@ -558,6 +627,10 @@ class MVSNeRF(nn.Module):
             self.nerf = Renderer_linear(D=D, W=W,input_ch_feat=input_ch_feat,
                      input_ch=input_ch_pts, output_ch=4, skips=skips,
                      input_ch_views=input_ch_views, use_viewdirs=True)
+        elif 'v3' == net_type:
+            if neus_conf is None:
+                print("no config for NeuS model found")
+            self.nerf = Renderer_NeuS(neus_conf)
 
     def forward_alpha(self, x):
         return self.nerf.forward_alpha(x)
@@ -566,7 +639,7 @@ class MVSNeRF(nn.Module):
         RGBA = self.nerf(x)
         return RGBA
 
-def create_nerf_mvs(args, pts_embedder=True, use_mvs=False, dir_embedder=True):
+def create_nerf_mvs(args, neus_conf, pts_embedder=True, use_mvs=False, dir_embedder=True):
     """Instantiate mvs NeRF's MLP model.
     """
 
@@ -585,7 +658,7 @@ def create_nerf_mvs(args, pts_embedder=True, use_mvs=False, dir_embedder=True):
     skips = [4]
     model = MVSNeRF(D=args.netdepth, W=args.netwidth,
                  input_ch_pts=input_ch, skips=skips,
-                 input_ch_views=input_ch_views, input_ch_feat=args.feat_dim, net_type=args.net_type).to(device)
+                 input_ch_views=input_ch_views, input_ch_feat=args.feat_dim, net_type=args.net_type, neus_conf=neus_conf).to(device)
 
     grad_vars = []
     grad_vars += list(model.parameters())

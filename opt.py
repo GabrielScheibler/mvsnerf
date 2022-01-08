@@ -80,6 +80,11 @@ def config_parser(cmd=None):
     parser.add_argument("--raw_noise_std", type=float, default=0.,
                         help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
 
+    # NeuS model options
+    parser.add_argument('--neus_conf', type=str, default='./configs/neus.conf')
+    
+
+
 
 
     ## blender flags
