@@ -17,10 +17,10 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 # pytorch-lightning
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning import LightningModule, Trainer, loggers
+import torch.nn.functional as F
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-#TODO implement cos_anneal from NeuS
 
 class SL1Loss(nn.Module):
     def __init__(self, levels=3):
@@ -120,20 +120,79 @@ class MVSSystem(LightningModule):
         imgs, proj_mats = data_mvs['images'], data_mvs['proj_mats']
         near_fars, depths_h = data_mvs['near_fars'], data_mvs['depths_h']
 
-
         volume_feature, img_feat, depth_values = self.MVSNet(imgs[:, :3], proj_mats[:, :3], near_fars[0,0],pad=args.pad)
         imgs = self.unpreprocess(imgs)
-
 
         N_rays, N_samples = args.batch_size, args.N_samples
         c2ws, w2cs, intrinsics = pose_ref['c2ws'], pose_ref['w2cs'], pose_ref['intrinsics']
         rays_pts, rays_dir, target_s, rays_NDC, depth_candidates, rays_o, rays_depth, ndc_parameters = \
             build_rays(imgs, depths_h, pose_ref, w2cs, c2ws, intrinsics, near_fars, N_rays, N_samples, pad=args.pad)
 
+        # rays_dir and rays_o are important
 
-        rgb, disp, acc, depth_pred, alpha, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir,
-                                                       volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)
+        rays_o = rays_o.reshape([-1,3]) # should be [batchsize 3]
+        rays_dir = rays_dir.reshape([-1,3]) # should be [batchsize 3]
 
+        near, far = near_far_from_sphere(rays_o, rays_dir) # should be [batchsize 1]
+        # near, far = near_fars.squeeze()[0][0].expand(rays_o.size()[0]).unsqueeze(-1), near_fars.squeeze()[0][1].expand(rays_o.size()[0]).unsqueeze(-1)
+        near, far = near.to(device), far.to(device)
+
+        nerf = self.render_kwargs_train['network_fn']
+
+        render_out = nerf.render(rays_o, rays_dir, near, far, imgs[:, :-1], volume_feature, pose_ref, args, rays_NDC, cos_anneal_ratio=self.get_cos_anneal_ratio())
+
+        rgb = render_out['color_fine']
+
+        """rgb, disp, acc, depth_pred, alpha, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir,
+                                                       volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)"""
+
+
+
+        # NEuS Loss
+        color_fine = render_out['color_fine']
+        s_val = render_out['s_val']
+        cdf_fine = render_out['cdf_fine']
+        gradient_error = render_out['gradient_error']
+        weight_max = render_out['weight_max']
+        weight_sum = render_out['weight_sum']
+        depth_pred = render_out['depth_preds'] # [n_rays]
+        #mask = depths_h > 0
+        mask = rays_depth > 0 # [n_rays]
+        mask = mask.int().float()
+        mask_sum = mask.sum() + 1e-5
+        true_rgb = target_s
+
+        # print(mask.mean())
+        # print(color_fine / (color_fine.sum()+1e-5))
+        # print(true_rgb / (true_rgb.sum()+1e-5))
+
+        # print(color_fine)
+        # print(true_rgb)
+
+        # color_fine += 10 * color_fine / (color_fine.sum()+1e-5)
+        #true_rgb = true_rgb / (true_rgb.sum()+1e-5)
+
+        # print(color_fine.size())
+        # print(true_rgb.size())
+
+        print("outside_rendering: ", torch.var(color_fine,dim=1).mean())
+
+        color_error = (color_fine - true_rgb) #* mask
+        color_error_hue = color_fine / (color_fine.sum()+1e-5) - true_rgb / (true_rgb.sum()+1e-5)
+        color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum') #/ mask_sum
+        color_fine_hue_loss = F.l1_loss(color_error_hue, torch.zeros_like(color_error), reduction='sum')
+        # img_loss = img2mse(color_fine, true_rgb)
+        # loss += color_fine_hue_loss * 1000
+        loss += color_fine_loss
+        # loss += img_loss
+
+        #psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
+
+        eikonal_loss = gradient_error
+        loss += eikonal_loss
+
+        mask_loss = F.binary_cross_entropy(torch.squeeze(weight_sum, dim=-1).clip(1e-3, 1.0 - 1e-3), mask)
+        #loss += mask_loss
 
         if self.args.with_depth:
             mask = rays_depth > 0
@@ -150,27 +209,24 @@ class MVSSystem(LightningModule):
             abs_err = abs_error(depth_pred, rays_depth, mask).mean()
             self.log('train/abs_err', abs_err, prog_bar=True)
 
-        ##################  rendering #####################
+        """##################  rendering #####################
         img_loss = img2mse(rgb, target_s)
         loss = loss + img_loss
-        if 'rgb0' in ret:
-            img_loss_coarse = img2mse(ret['rgb0'], target_s)
-            psnr = mse2psnr2(img_loss_coarse.item())
-            self.log('train/PSNR_coarse', psnr.item(), prog_bar=True)
-            loss = loss + img_loss_coarse
-
 
         if args.with_depth:
             psnr = mse2psnr(img2mse(rgb.cpu()[mask], target_s.cpu()[mask]))
             psnr_out = mse2psnr(img2mse(rgb.cpu()[~mask], target_s.cpu()[~mask]))
             self.log('train/PSNR_out', psnr_out.item(), prog_bar=True)
         else:
-            psnr = mse2psnr2(img_loss.item())
+        psnr = mse2psnr2(img_loss.item())
 
         with torch.no_grad():
             self.log('train/loss', loss, prog_bar=True)
             self.log('train/img_mse_loss', img_loss.item(), prog_bar=False)
-            self.log('train/PSNR', psnr.item(), prog_bar=True)
+            self.log('train/PSNR', psnr.item(), prog_bar=True)"""
+
+        print('iter:{:8>d} loss = {} color_loss = {} eikonal_loss = {} mask_loss = {}'.format(self.global_step, loss, color_fine_loss, eikonal_loss, mask_loss))
+        
 
         if self.global_step % 20000==19999:
             self.save_ckpt(f'{self.global_step}')
@@ -181,6 +237,7 @@ class MVSSystem(LightningModule):
 
 
     def validation_step(self, batch, batch_nb):
+        #torch.set_grad_enabled(True)
 
         if 'scan' in batch.keys():
             batch.pop('scan')
@@ -203,29 +260,99 @@ class MVSSystem(LightningModule):
             args.img_downscale = torch.rand((1,)) * 0.75 + 0.25  # for super resolution
             world_to_ref = pose_ref['w2cs'][0]
             tgt_to_world, intrinsic = pose_ref['c2ws'][-1], pose_ref['intrinsics'][-1]
+
+            # pose_ref['c2ws'][0], pose_ref['c2ws'][3] = pose_ref['c2ws'][3], pose_ref['c2ws'][0]
+            # pose_ref['w2cs'][0], pose_ref['w2cs'][3] = pose_ref['w2cs'][3], pose_ref['w2cs'][0]
+            # pose_ref['intrinsics'][0], pose_ref['intrinsics'][3] = pose_ref['intrinsics'][3], pose_ref['intrinsics'][0]
+
             volume_feature, img_feat, _ = self.MVSNet(imgs[:, :3], proj_mats[:, :3], near_fars[0], pad=args.pad)
             imgs = self.unpreprocess(imgs)
-            rgbs, depth_preds = [],[]
+            rgbs, depth_preds, masks_learned = [],[],[]
             for chunk_idx in range(H*W//args.chunk + int(H*W%args.chunk>0)):
-
-
                 rays_pts, rays_dir, rays_NDC, depth_candidates, rays_o, ndc_parameters = \
                     build_rays_test(H, W, tgt_to_world, world_to_ref, intrinsic, near_fars, near_fars[-1], args.N_samples, pad=args.pad, chunk=args.chunk, idx=chunk_idx)
 
+                # rays_dir and rays_o are important
+
+                # print(rays_pts)
+                
+                # rays_o = rays_o.reshape([1,-1,3]) # should be [chunk 3]
+                # rays_dir = rays_dir.reshape([1,-1,3]) # should be [chunk 3]
+
+                _, _, _, H, W = imgs.shape
+                inv_scale = torch.tensor([W-1, H-1]).cuda()
+
+                # print_frustum(pose_ref, inv_scale, ref_idx=0)
+
+                rays_o = rays_o.reshape([-1,3]) # should be [chunk 3]
+                rays_dir = rays_dir.reshape([-1,3]) # should be [chunk 3]
+
+                near, far = near_far_from_sphere(rays_o, rays_dir) # should be [chunk 1]
+                # near, far = near_fars.squeeze()[0][0].expand(rays_o.size()[0]).unsqueeze(-1), near_fars.squeeze()[0][1].expand(rays_o.size()[0]).unsqueeze(-1)
+                near, far = near.to(device), far.to(device)
+
+                # print(near, far)
+
+                nerf = self.render_kwargs_train['network_fn']
+
+                # render_out = nerf.render(rays_o, rays_dir, near, far, cos_anneal_ratio=self.get_cos_anneal_ratio())
+                render_out = nerf.render(rays_o, rays_dir, near, far, imgs[:, :-1], volume_feature, pose_ref, args, rays_NDC, cos_anneal_ratio=self.get_cos_anneal_ratio())
+
+                rgb = render_out['color_fine']
+
+                """rgb, disp, acc, depth_pred, alpha, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir,
+                                                            volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)"""
+
+                # NEuS Loss
+                color_fine = render_out['color_fine']
+                s_val = render_out['s_val']
+                cdf_fine = render_out['cdf_fine']
+                gradient_error = render_out['gradient_error']
+                weight_max = render_out['weight_max']
+                weight_sum = render_out['weight_sum']
+                depth_pred = render_out['depth_preds'] # [n_rays]
+                #mask = depths_h > 0
+                #mask = rays_depth > 0 # [n_rays]
+                #mask = mask.int().float()
+                #mask_sum = mask.sum() + 1e-5
+                #true_rgb = rgb
+
+                #print(mask.mean())
+
+                print("outside_rendering: ", torch.var(color_fine,dim=1).mean())
+
+                
+                #mask_gt = mask_gt.expand(-1,-1,-1)
+
+                mask_learned = depth_pred > 0
+                mask_learned = mask_learned.float()
+                # print(mask_learned.size())
+
 
                 # rendering
-                rgb, disp, acc, depth_pred, density_ray, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir,
-                                                       volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)
-                rgbs.append(rgb.cpu());depth_preds.append(depth_pred.cpu())
+                """rgb, disp, acc, depth_pred, density_ray, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir,
+                                                        volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)"""
+                rgbs.append(rgb.cpu());depth_preds.append(depth_pred.cpu());
+                masks_learned.append(mask_learned.cpu());
 
             imgs = imgs.cpu()
             rgb, depth_r = torch.clamp(torch.cat(rgbs).reshape(H, W, 3).permute(2,0,1),0,1), torch.cat(depth_preds).reshape(H, W)
+            masks_learned = torch.cat(masks_learned).reshape(H, W)
             img_err_abs = (rgb - imgs[0,-1]).abs()
+
+            masks_gt = depths_h[0, -1].cpu() > 0
+            masks_gt = masks_gt.float()
+
+            masks_learned = masks_learned.unsqueeze(0).expand(3,-1,-1)
+            masks_gt = masks_gt.unsqueeze(0).expand(3,-1,-1)
+
 
             if self.args.with_depth:
                 depth_gt_render = depths_h[0, -1].cpu()
                 mask = depth_gt_render > 0
                 log['val_psnr'] = mse2psnr(torch.mean(img_err_abs[:,mask] ** 2))
+                # print(depth_r.mean())
+                # print(depth_gt_render.mean())
             else:
                 log['val_psnr'] = mse2psnr(torch.mean(img_err_abs**2))
 
@@ -256,7 +383,7 @@ class MVSSystem(LightningModule):
             self.logger.experiment.add_images('val/rgb_pred_err', img_vis, self.global_step)
 
             os.makedirs(f'runs_new/{self.args.expname}/{self.args.expname}/',exist_ok=True)
-            img_vis = torch.cat((img_vis,depth_pred_r_[None]),dim=0).permute(2,0,3,1).reshape(img_vis.shape[2],-1,3).numpy()
+            img_vis = torch.cat((img_vis,depth_pred_r_[None],masks_learned[None],masks_gt[None]),dim=0).permute(2,0,3,1).reshape(img_vis.shape[2],-1,3).numpy()
 
             imageio.imwrite(f'runs_new/{self.args.expname}/{self.args.expname}/{self.global_step:08d}_{self.idx:02d}.png', (img_vis*255).astype('uint8'))
             self.idx += 1
@@ -298,8 +425,26 @@ class MVSSystem(LightningModule):
         torch.save(ckpt, path)
         print('Saved checkpoints at', path)
 
+    def get_cos_anneal_ratio(self):
+        if self.args.anneal_end == 0.0:
+            return 1.0
+        else:
+            return np.min([1.0, self.global_step / self.args.anneal_end])
+
+    """def update_learning_rate(self):
+        if self.global_step < self.args.warm_up_end:
+            learning_factor = self.global_step / self.args.warm_up_end
+        else:
+            alpha = self.learning_rate_alpha
+            progress = (self.iter_step - self.warm_up_end) / (self.end_iter - self.warm_up_end)
+            learning_factor = (np.cos(np.pi * progress) + 1.0) * 0.5 * (1 - alpha) + alpha
+
+        for g in self.optimizer.param_groups:
+            g['lr'] = self.learning_rate * learning_factor"""
+
 if __name__ == '__main__':
     torch.set_default_dtype(torch.float32)
+    #torch.cuda.set_device(0)
     args = config_parser()
     system = MVSSystem(args)
     checkpoint_callback = ModelCheckpoint(os.path.join(f'runs_new/{args.expname}/ckpts/','{epoch:02d}'),

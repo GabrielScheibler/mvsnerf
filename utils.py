@@ -1,5 +1,7 @@
+from cmath import acos
 import os, torch, cv2, re
 import numpy as np
+import math
 
 
 from PIL import Image
@@ -117,16 +119,22 @@ def get_ndc_coordinate(w2c_ref, intrinsic_ref, point_samples, inv_scale, near=2,
     N_rays, N_samples = point_samples.shape[:2]
     point_samples = point_samples.reshape(-1, 3)
 
+    # print(point_samples)
+
     # wrap to ref view
     if w2c_ref is not None:
         R = w2c_ref[:3, :3]  # (3, 3)
         T = w2c_ref[:3, 3:]  # (3, 1)
         point_samples = torch.matmul(point_samples, R.t()) + T.reshape(1,3)
+        # print(point_samples)
+        # print(torch.sum(point_samples * point_samples, dim=-1))
 
     if intrinsic_ref is not None:
         # using projection
         point_samples_pixel =  point_samples @ intrinsic_ref.t()
-        point_samples_pixel[:,:2] = (point_samples_pixel[:,:2] / point_samples_pixel[:,-1:] + 0.0) / inv_scale.reshape(1,2)  # normalize to 0~1
+        # print("pointos: ",point_samples_pixel)
+        point_samples_pixel[:,:2] = (point_samples_pixel[:,:2] / point_samples_pixel[:,-1:]) / inv_scale.reshape(1,2)  # normalize to 0~1
+        # print("pointas: ",point_samples_pixel)
         if not lindisp:
             point_samples_pixel[:,2] = (point_samples_pixel[:,2] - near) / (far - near)  # normalize to 0~1
         else:
@@ -144,6 +152,40 @@ def get_ndc_coordinate(w2c_ref, intrinsic_ref, point_samples, inv_scale, near=2,
 
     point_samples_pixel = point_samples_pixel.view(N_rays, N_samples, 3)
     return point_samples_pixel
+
+def inverse_get_ndc_coordinate(c2w_ref, intrinsic_ref, point_samples_pixel, inv_scale, near=2, far=6, pad=0, lindisp=False):
+    '''
+        point_samples [N_rays N_sample 3]
+    '''
+    #TODO make differentiable
+
+    N_rays, N_samples = point_samples_pixel.shape[:2]
+    point_samples_pixel = point_samples_pixel.reshape(-1, 3)
+
+    # print(point_samples)
+
+    if intrinsic_ref is not None:
+        # using projection
+        # point_samples_pixel = point_samples_pixel * [[1,1,(far - near)]] + [[0,0,near]]
+        # eye = torch.eye(3)
+        # eye[2,0] = -1
+        # eye[1,0]
+        # points_samples_pixel = point_samples_pixel * point_samples_pixel[:,-1:] @ [[1,0,0],[0,1,0],[0,0,1]]
+
+        point_samples_pixel[:,2] = (point_samples_pixel[:,2]) * (far - near) + near  # normalize to near~far
+        point_samples_pixel[:,:2] = (point_samples_pixel[:,:2] * point_samples_pixel[:,-1:]) * inv_scale.reshape(1,2)  # normalize to W,H
+        point_samples =  point_samples_pixel @ torch.tensor(np.linalg.inv(intrinsic_ref.cpu())).t().cuda()
+
+    # wrap to ref view
+    if c2w_ref is not None:
+        R = c2w_ref[:3, :3]  # (3, 3)
+        T = c2w_ref[:3, 3:]  # (3, 1)
+        point_samples = torch.matmul(point_samples, R.t()) + T.reshape(1,3)
+        # print(point_samples)
+        # print(torch.sum(point_samples * point_samples, dim=-1))
+
+    point_samples = point_samples.view(N_rays, N_samples, 3)
+    return point_samples
 
 def build_rays(imgs, depths, pose_ref, w2cs, c2ws, intrinsics, near_fars, N_rays, N_samples, pad=0, is_precrop_iters=False, ref_idx=0, importanceSampling=False, with_depth=False, is_volume=False):
     '''
@@ -225,18 +267,18 @@ def build_rays(imgs, depths, pose_ref, w2cs, c2ws, intrinsics, near_fars, N_rays
 
         # position
         ray_coordinate_world.append(point_samples)  # [ray_samples N_samples 3] xyz in [0,1]
-        points_ndc = get_ndc_coordinate(w2c_ref, intrinsic_ref, point_samples, inv_scale, near=near_ref, far=far_ref, pad=pad)
+        points_ndc = get_ndc_coordinate(w2c_ref, intrinsic_ref, point_samples, inv_scale, near=near_ref, far=far_ref, pad=pad) #ndc = normalized device coordinates
 
         ray_coordinate_ref.append(points_ndc)
 
     ndc_parameters = {'w2c_ref':w2c_ref, 'intrinsic_ref':intrinsic_ref, 'inv_scale':inv_scale, 'near':near_ref, 'far':far_ref}
     colors = torch.cat(colors, dim=1).permute(1,0)
-    rays_depths = torch.cat(rays_depths) if len(rays_depths)>0 else None
-    depth_candidates = torch.cat(depth_candidates, dim=0)
-    ray_dir_world = torch.cat(ray_dir_world, dim=0)
-    ray_coordinate_world = torch.cat(ray_coordinate_world, dim=0)
-    rays_os = torch.cat(rays_os, dim=0).permute(1,0)
-    ray_coordinate_ref = torch.cat(ray_coordinate_ref, dim=0)
+    rays_depths = torch.cat(rays_depths) if len(rays_depths)>0 else None #ground truth depth for the ray
+    depth_candidates = torch.cat(depth_candidates, dim=0) # depth of samples on the ray
+    ray_dir_world = torch.cat(ray_dir_world, dim=0) # ray direction in world space
+    ray_coordinate_world = torch.cat(ray_coordinate_world, dim=0) #coordinates of all samples in world space
+    rays_os = torch.cat(rays_os, dim=0).permute(1,0) #coordinate of ray startpoint in world space
+    ray_coordinate_ref = torch.cat(ray_coordinate_ref, dim=0) #coordinates of all samples in reference camera space
 
     return ray_coordinate_world, ray_dir_world, colors, ray_coordinate_ref, depth_candidates, rays_os, rays_depths, ndc_parameters
 
@@ -309,15 +351,15 @@ def build_color_volume(point_samples, pose_ref, imgs, img_feat=None, downscale=1
 
     C += with_mask
     C += 0 if img_feat is None else img_feat.shape[2]
-    colors = torch.empty((*point_samples.shape[:2], V*C), device=imgs.device, dtype=torch.float)
+    colors = torch.empty((*point_samples.shape[:2], V*C), device=imgs.device, dtype=torch.float) # [N_Rays N_samples V*C]
     for i,idx in enumerate(range(V)):
 
         w2c_ref, intrinsic_ref = pose_ref['w2cs'][idx], pose_ref['intrinsics'][idx].clone()  # assume camera 0 is reference
-        point_samples_pixel = get_ndc_coordinate(w2c_ref, intrinsic_ref, point_samples, inv_scale)[None]
-        grid = point_samples_pixel[...,:2]*2.0-1.0
+        point_samples_pixel = get_ndc_coordinate(w2c_ref, intrinsic_ref, point_samples, inv_scale)[None] # [1 N_Rays N_samples 3]
+        grid = point_samples_pixel[...,:2]*2.0-1.0 # [1 N_Rays N_samples 3]
 
         # img = F.interpolate(imgs[:, idx], scale_factor=downscale, align_corners=True, mode='bilinear',recompute_scale_factor=True) if downscale != 1.0 else imgs[:, idx]
-        data = F.grid_sample(imgs[:, idx], grid, align_corners=True, mode='bilinear', padding_mode='border')
+        data = F.grid_sample(imgs[:, idx], grid, align_corners=True, mode='bilinear', padding_mode='border') #[1 3 N_Rays N_Samples]
         if img_feat is not None:
             data = torch.cat((data,F.grid_sample(img_feat[:,idx], grid, align_corners=True, mode='bilinear', padding_mode='zeros')),dim=1)
 
@@ -329,7 +371,7 @@ def build_color_volume(point_samples, pose_ref, imgs, img_feat=None, downscale=1
         colors[...,i*C:i*C+C] = data[0].permute(1, 2, 0)
         del grid, point_samples_pixel, data
 
-    return colors
+    return colors # [N_Rays N_samples V*C]
 
 
 def normal_vect(vect, dim=-1):
@@ -709,3 +751,320 @@ def get_nearest_pose_ids(tar_pose, ref_poses, num_select):
     sorted_ids = np.argsort(dists, axis=-1)
     selected_ids = sorted_ids[:,:num_select]
     return selected_ids
+
+
+def near_far_from_sphere(rays_o, rays_d):
+        a = torch.sum(rays_d**2, dim=-1, keepdim=True)
+        b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
+        mid = 0.5 * (-b) / a
+        near = mid - 1.0
+        far = mid + 1.0
+        return near, far
+
+def near_far_from_sphere_pose(c2w, intrinsic, W, H, N_rays=1, ref_idx=0):
+
+    # N, V, C, H, W = imgs.shape
+    # w2c_ref, intrinsic_ref = pose_ref['w2cs'][ref_idx], pose_ref['intrinsics'][ref_idx]  # assume camera 0 is reference
+    # c2w = pose_ref['c2ws'][ref_idx]
+    # intrinsic = pose_ref['intrinsics'][ref_idx]
+    # inv_scale = torch.tensor([W-1, H-1]).cuda()
+
+
+
+    ys, xs = H // 2, W // 2
+
+    dirs = np.array([(xs-intrinsic[0,2])/intrinsic[0,0], (ys-intrinsic[1,2])/intrinsic[1,1], 1]) # use 1 instead of -1
+
+
+    rays_d = dirs @ np.transpose(c2w[:3,:3]) # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    rays_o = c2w[:3,-1].copy()
+
+    # rays_o, rays_ds, pixel_coordinates = get_rays_mvs(H, W, intrinsic, c2w, N_rays)   # [N_rays 3]
+    a = np.sum(rays_d**2, axis=-1, keepdims=True)
+    b = 2.0 * np.sum(rays_o * rays_d, axis=-1, keepdims=True)
+    mid = 0.5 * (-b) / a
+    near = mid - 1.0
+    far = mid + 1.0
+    return near, far
+
+def gen_pts_feats_no_ndc(imgs, volume_feature, rays_pts, pose_ref, feat_dim, img_feat=None, img_downscale=1.0, use_color_volume=False, net_type='v0', ref_idx=0):
+
+    rays_ndc = get_ndc_points(pose_ref, rays_pts, imgs, ref_idx=ref_idx)
+
+    N_rays, N_samples = rays_pts.shape[:2]
+    if img_feat is not None:
+        feat_dim += img_feat.shape[1]*img_feat.shape[2]
+
+    if not use_color_volume:
+        input_feat = torch.empty((N_rays, N_samples, feat_dim), device=imgs.device, dtype=torch.float)
+        ray_feats = index_point_feature(volume_feature, rays_ndc) if torch.is_tensor(volume_feature) else volume_feature(rays_ndc)
+        input_feat[..., :8] = ray_feats
+        input_feat[..., 8:] = build_color_volume(rays_pts, pose_ref, imgs, img_feat, with_mask=True, downscale=img_downscale)
+    else:
+        input_feat = index_point_feature(volume_feature, rays_ndc) if torch.is_tensor(volume_feature) else volume_feature(rays_ndc)
+    return input_feat
+
+def get_ndc_points(pose_ref, rays_pts, imgs, ref_idx=0):
+    N, V, C, H, W = imgs.shape
+
+    w2c_ref, intrinsic_ref = pose_ref['w2cs'][ref_idx], pose_ref['intrinsics'][ref_idx]  # assume camera 0 is reference
+    inv_scale = torch.tensor([W-1, H-1]).cuda()
+
+    ray_coordinate_ref = []
+    near_ref, far_ref = pose_ref['near_fars'][ref_idx, 0], pose_ref['near_fars'][ref_idx, 1]
+
+    points_ndc = get_ndc_coordinate(w2c_ref, intrinsic_ref, rays_pts, inv_scale, near=near_ref, far=far_ref, pad=0) #ndc = normalized device coordinates
+
+    return points_ndc
+
+def points_w2c_unitspshere(pose_ref, point_samples, inv_scale, ref_idx=0):
+
+    intrinsic_ref = pose_ref['intrinsics'][ref_idx]
+    near_ref, far_ref = pose_ref['near_fars'][ref_idx]
+    w2c_ref = pose_ref['w2cs'][ref_idx]
+
+    point_samples = get_ndc_coordinate(w2c_ref, intrinsic_ref, point_samples, inv_scale, near=near_ref, far=far_ref, pad=0) #ndc = normalized device coordinates
+
+    point_samples[:,:,2:] = point_samples[:,:,2:] - 0.5
+    point_samples[:,:,2:] = point_samples[:,:,2:] * 2.0
+    point_samples = point_samples / 1.414213562373095 #shrink by sqrt(2) so that cube fits into unit sphere 
+
+    return point_samples
+
+def points_c2w_unitspshere(pose_ref, point_samples, inv_scale, ref_idx=0):
+
+    intrinsic_ref = pose_ref['intrinsics'][ref_idx]
+    near_ref, far_ref = pose_ref['near_fars'][ref_idx]
+    c2w_ref = pose_ref['c2ws'][ref_idx]
+
+    point_samples = point_samples * 1.414213562373095 #shrink by sqrt(2) so that cube fits into unit sphere
+    point_samples[:,:,2:] = point_samples[:,:,2:] / 2.0
+    point_samples[:,:,2:] = point_samples[:,:,2:] + 0.5
+
+    point_samples = inverse_get_ndc_coordinate(c2w_ref, intrinsic_ref, point_samples, inv_scale, near=near_ref, far=far_ref, pad=0) #ndc = normalized device coordinates
+
+    return point_samples
+
+def points_w2c_unitspshere_no_projection(pose_ref, point_samples, inv_scale, ref_idx=0):
+    '''
+        point_samples [N_rays N_sample 3]
+    '''
+
+    intrinsic_ref = pose_ref['intrinsics'][ref_idx]
+    near, far = pose_ref['near_fars'][ref_idx]
+    w2c_ref = pose_ref['w2cs'][ref_idx]
+    c2w_ref = pose_ref['c2ws'][ref_idx]
+
+    N_rays, N_samples = point_samples.shape[:2]
+    point_samples = point_samples.reshape(-1, 3)
+
+    lindisp = False
+    pad = 0
+
+    frustum_corners_ndc = torch.tensor([[[-1,-1,0],[-1,-1,1],[1,1,0],[1,1,1],[0,0,0.5],[0,0,1]]]).cuda()
+    frustum_corners_world = inverse_get_ndc_coordinate(c2w_ref, intrinsic_ref, frustum_corners_ndc, inv_scale, near, far)
+    frustum_corners_world = frustum_corners_world.squeeze()
+    scale = torch.sum((frustum_corners_world[4,:] - frustum_corners_world[1,:])**2)
+    frustum_middle_world = frustum_corners_world[4,:]
+    direction_world = frustum_corners_world[5,:] - frustum_corners_world[4,:]
+    direction_world = direction_world / direction_world.abs().sum()
+    camera_pos_world = c2w_ref[:3,3]
+
+    camera_pos = camera_pos_world - frustum_middle_world
+    ay = math.atan2(camera_pos[0],camera_pos[2])
+    camera_pos_ry = rotate_2d(1, camera_pos, ay)
+    ax = math.atan2(camera_pos_ry[1],camera_pos_ry[2])
+    # camera_pos_ry_rx = rotate_2d(0, camera_pos_ry, ax)
+
+    point_samples = point_samples - frustum_middle_world
+    point_samples = rotate_2d(1, point_samples, ay)
+    point_samples = rotate_2d(0, point_samples, ax)
+
+    point_samples = point_samples / scale
+    
+    point_samples = point_samples.view(N_rays, N_samples, 3)
+    # print(point_samples)
+    return point_samples
+
+def points_c2w_unitspshere_no_projection(pose_ref, point_samples, inv_scale, ref_idx=0):
+    '''
+        point_samples [N_rays N_sample 3]
+    '''
+
+    intrinsic_ref = pose_ref['intrinsics'][ref_idx]
+    near, far = pose_ref['near_fars'][ref_idx]
+    w2c_ref = pose_ref['w2cs'][ref_idx]
+    c2w_ref = pose_ref['c2ws'][ref_idx]
+
+    N_rays, N_samples = point_samples.shape[:2]
+    point_samples = point_samples.reshape(-1, 3)
+
+    lindisp = False
+    pad = 0
+
+    frustum_corners_ndc = torch.tensor([[[-1,-1,0],[-1,-1,1],[1,1,0],[1,1,1],[0,0,0.5],[0,0,1]]]).cuda()
+    frustum_corners_world = inverse_get_ndc_coordinate(c2w_ref, intrinsic_ref, frustum_corners_ndc, inv_scale, near, far)
+    frustum_corners_world = frustum_corners_world.squeeze()
+    scale = torch.sum((frustum_corners_world[4,:] - frustum_corners_world[1,:])**2)
+    frustum_middle_world = frustum_corners_world[4,:]
+    direction_world = frustum_corners_world[5,:] - frustum_corners_world[4,:]
+    direction_world = direction_world / direction_world.abs().sum()
+    camera_pos_world = c2w_ref[:3,3]
+
+    camera_pos = camera_pos_world - frustum_middle_world
+    ay = math.atan2(camera_pos[0],camera_pos[2])
+    camera_pos_ry = rotate_2d(1, camera_pos, ay)
+    ax = math.atan2(camera_pos_ry[1],camera_pos_ry[2])
+    # camera_pos_ry_rx = rotate_2d(0, camera_pos_ry, ax)
+
+    point_samples = point_samples * scale
+
+    point_samples = rotate_2d(0, point_samples, -ax)
+    point_samples = rotate_2d(1, point_samples, -ay)
+    point_samples = point_samples + frustum_middle_world
+    
+    
+    point_samples = point_samples.view(N_rays, N_samples, 3)
+    # print(point_samples)
+    return point_samples
+
+
+def rotate_unitsphere(pose_ref, point_samples, ref_idx=0):
+    '''
+        point_samples [N_rays N_sample 3]
+    '''
+
+    c2w_ref = pose_ref['c2ws'][ref_idx]
+
+    N_rays, N_samples = point_samples.shape[:2]
+    point_samples = point_samples.reshape(-1, 3)
+
+    camera_pos = c2w_ref[:3,3]
+    ay = math.atan2(camera_pos[0],camera_pos[2])
+    camera_pos_ry = rotate_2d(1, camera_pos, ay)
+    ax = math.atan2(camera_pos_ry[1],camera_pos_ry[2])
+    # camera_pos_ry_rx = rotate_2d(0, camera_pos_ry, ax)
+
+    point_samples = rotate_2d(1, point_samples, ay)
+    point_samples = rotate_2d(0, point_samples, ax)
+    
+    point_samples = point_samples.view(N_rays, N_samples, 3)
+
+    return point_samples
+
+def inverse_rotate_unitsphere(pose_ref, point_samples, ref_idx=0):
+    '''
+        point_samples [N_rays N_sample 3]
+    '''
+
+    c2w_ref = pose_ref['c2ws'][ref_idx]
+
+    N_rays, N_samples = point_samples.shape[:2]
+    point_samples = point_samples.reshape(-1, 3)
+
+    camera_pos = c2w_ref[:3,3]
+    ay = math.atan2(camera_pos[0],camera_pos[2])
+    camera_pos_ry = rotate_2d(1, camera_pos, ay)
+    ax = math.atan2(camera_pos_ry[1],camera_pos_ry[2])
+    # camera_pos_ry_rx = rotate_2d(0, camera_pos_ry, ax)
+
+    point_samples = rotate_2d(0, point_samples, -ax)
+    point_samples = rotate_2d(1, point_samples, -ay)
+    
+    point_samples = point_samples.view(N_rays, N_samples, 3)
+
+    return point_samples
+
+def rotate_2d(axis, points, angle):
+    """
+    Rotate a point counterclockwise by a given angle around a given origin.
+
+    The angle should be given in radians.
+    """
+    sina = math.sin(angle)
+    cosa= math.cos(angle)
+
+    R = torch.eye(3).cuda()
+    if axis == 0:
+        R[1,1],R[1,2],R[2,1],R[2,2] = cosa,sina,-sina,cosa
+    elif axis == 1:
+        R[0,0],R[0,2],R[2,0],R[2,2] = cosa,sina,-sina,cosa
+    else:
+        R[0,0],R[0,1],R[1,0],R[1,1] = cosa,sina,-sina,cosa
+
+    points = points @ R
+
+    return points
+
+def world_to_sdf_input_space(pose_ref, point_samples, inv_scale):
+    ref_idx = 0
+    # points = points_w2c_unitspshere(pose_ref, point_samples, inv_scale, ref_idx)
+    # points = get_ndc_points_noimgs(pose_ref, point_samples, inv_scale, ref_idx)
+    # points = points_w2c_unitspshere_no_projection(pose_ref, point_samples, inv_scale, ref_idx)
+    points = rotate_unitsphere(pose_ref, point_samples, ref_idx)
+    # points = point_samples
+    return points
+
+def world_to_sdf_input_space_dirs(pose_ref, point_samples, inv_scale): 
+    zero_points = torch.zeros_like(point_samples)
+    dir_points = world_to_sdf_input_space(pose_ref, point_samples, inv_scale)
+    zero_points = world_to_sdf_input_space(pose_ref, zero_points, inv_scale)
+    dirs = dir_points - zero_points
+    dirs = dirs / (torch.sum(dirs, dim=-1, keepdim=True) + 1e-5)
+
+    # dirs[:,:,:2] = 0
+    # dirs[:,:,2:] = 1
+
+    # nr,ns,_ = point_samples.shape
+    # dirs = point_samples.reshape(-1, 3) @ pose_ref['w2cs'][ref_idx][:3,:3].t()
+    # dirs = dirs.reshape(nr, ns, 3)
+    return dirs
+
+def sdf_input_space_to_world(pose_ref, point_samples, inv_scale):
+    ref_idx = 0
+    # points = points_c2w_unitspshere_no_projection(pose_ref, point_samples, inv_scale, ref_idx)
+    points = inverse_rotate_unitsphere(pose_ref, point_samples, ref_idx)
+    # points = point_samples
+    return points
+
+def sdf_input_space_to_world_dirs(pose_ref, point_samples, inv_scale):
+    zero_points = torch.zeros_like(point_samples)
+    dir_points = sdf_input_space_to_world(pose_ref, point_samples, inv_scale)
+    zero_points = sdf_input_space_to_world(pose_ref, zero_points, inv_scale)
+    dirs = dir_points - zero_points
+    dirs = dirs / (torch.sum(dirs, dim=-1, keepdim=True) + 1e-5)
+    return dirs
+
+def get_ndc_points_noimgs(pose_ref, rays_pts, inv_scale, ref_idx=0):
+
+    w2c_ref, intrinsic_ref = pose_ref['w2cs'][ref_idx], pose_ref['intrinsics'][ref_idx]  # assume camera 0 is reference
+
+    ray_coordinate_ref = []
+    near_ref, far_ref = pose_ref['near_fars'][ref_idx, 0], pose_ref['near_fars'][ref_idx, 1]
+
+    points_ndc = get_ndc_coordinate(w2c_ref, intrinsic_ref, rays_pts, inv_scale, near=near_ref, far=far_ref, pad=0) #ndc = normalized device coordinates
+
+    return points_ndc
+
+def print_frustum(pose_ref, inv_scale, ref_idx=0):
+
+    intrinsic_ref = pose_ref['intrinsics'][ref_idx]
+    near, far = pose_ref['near_fars'][ref_idx]
+    w2c_ref = pose_ref['w2cs'][ref_idx]
+    c2w_ref = pose_ref['c2ws'][ref_idx]
+
+    lindisp = False
+    pad = 0
+
+    frustum_corners_ndc = torch.tensor([[[-1,-1,0],[-1,-1,1],[1,1,0],[1,1,1],[0,0,0.5],[0,0,1]]]).cuda()
+    frustum_corners_world = inverse_get_ndc_coordinate(c2w_ref, intrinsic_ref, frustum_corners_ndc, inv_scale, near, far)
+    frustum_corners_world = frustum_corners_world.squeeze()
+    scale = torch.sum((frustum_corners_world[4,:] - frustum_corners_world[1,:])**2)
+    frustum_middle_world = frustum_corners_world[4,:]
+    direction_world = frustum_corners_world[5,:] - frustum_corners_world[4,:]
+    direction_world = direction_world / direction_world.abs().sum()
+    camera_pos_world = c2w_ref[:3,3]
+
+    print(frustum_corners_world)
+    return

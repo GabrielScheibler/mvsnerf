@@ -539,12 +539,13 @@ class Renderer_linear(nn.Module):
 
         return outputs
 
-#TODO implement NeuS model
 class Renderer_NeuS(nn.Module):
     def __init__(self, neus_conf):
         """
         """
         super(Renderer_NeuS, self).__init__()
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.conf = neus_conf
 
@@ -561,7 +562,8 @@ class Renderer_NeuS(nn.Module):
 
 
     def forward_alpha(self,x):
-        dim = x.shape[-1]
+        return x
+        """dim = x.shape[-1]
         input_pts, input_feats = torch.split(x, [self.in_ch_pts, self.in_ch_feat], dim=-1)
 
         h = input_pts
@@ -573,10 +575,11 @@ class Renderer_NeuS(nn.Module):
                 h = torch.cat([input_pts, h], -1)
 
         alpha = self.alpha_linear(h)
-        return alpha
+        return alpha"""
 
     def forward(self, x):
-        dim = x.shape[-1]
+        return x
+        """dim = x.shape[-1]
         in_ch_feat = dim-self.in_ch_pts-self.in_ch_views
         input_pts, input_feats, input_views = torch.split(x, [self.in_ch_pts, in_ch_feat, self.in_ch_views], dim=-1)
 
@@ -603,7 +606,10 @@ class Renderer_NeuS(nn.Module):
         else:
             outputs = self.output_linear(h)
 
-        return outputs
+        return outputs"""
+
+    def render(self, rays_o, rays_d, near, far, imgs, volume_feature, pose_ref, args, pts_ndc, perturb_overwrite=-1, background_rgb=None, cos_anneal_ratio=0.0):
+        return self.renderer.render(rays_o, rays_d, near, far, imgs, volume_feature, pose_ref, args, pts_ndc, perturb_overwrite, background_rgb, cos_anneal_ratio)
 
 
 class MVSNeRF(nn.Module):
@@ -639,6 +645,9 @@ class MVSNeRF(nn.Module):
         RGBA = self.nerf(x)
         return RGBA
 
+    def render(self, rays_o, rays_d, near, far, imgs, volume_feature, pose_ref, args, pts_ndc, perturb_overwrite=-1, background_rgb=None, cos_anneal_ratio=0.0):
+        return self.nerf.render(rays_o, rays_d, near, far, imgs, volume_feature, pose_ref, args, pts_ndc, perturb_overwrite, background_rgb, cos_anneal_ratio)
+
 def create_nerf_mvs(args, neus_conf, pts_embedder=True, use_mvs=False, dir_embedder=True):
     """Instantiate mvs NeRF's MLP model.
     """
@@ -662,13 +671,6 @@ def create_nerf_mvs(args, neus_conf, pts_embedder=True, use_mvs=False, dir_embed
 
     grad_vars = []
     grad_vars += list(model.parameters())
-
-    model_fine = None
-    if args.N_importance > 0:
-        model_fine = MVSNeRF(D=args.netdepth, W=args.netwidth,
-                 input_ch_pts=input_ch, skips=skips,
-                 input_ch_views=input_ch_views, input_ch_feat=args.feat_dim).to(device)
-        grad_vars += list(model_fine.parameters())
 
     network_query_fn = lambda pts, viewdirs, rays_feats, network_fn: run_network_mvs(pts, viewdirs, rays_feats, network_fn,
                                                                         embed_fn=embed_fn,
@@ -711,7 +713,7 @@ def create_nerf_mvs(args, neus_conf, pts_embedder=True, use_mvs=False, dir_embed
         'network_query_fn': network_query_fn,
         'perturb': args.perturb,
         'N_importance': args.N_importance,
-        'network_fine': model_fine,
+        'network_fine': None,
         'N_samples': args.N_samples,
         'network_fn': model,
         'network_mvs': EncodingNet,

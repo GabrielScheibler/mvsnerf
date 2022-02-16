@@ -1,6 +1,6 @@
 
 from torch.utils.data import Dataset
-from utils import read_pfm
+from utils import near_far_from_sphere_pose, read_pfm
 import os
 import numpy as np
 import cv2
@@ -26,6 +26,8 @@ class MVSDatasetDTU(Dataset):
         """
         self.root_dir = root_dir
         self.split = split
+        self.scale_mat = [[246.40544,0.0,0.0,-37.542286],[0.0,246.40544,0.0,-42.644344],[0.0,0.0,246.40544,653.20886],[0.0,0.0,0.0,1.0]]
+
 
         assert self.split in ['train', 'val', 'test'], \
             'split must be either "train", "val" or "test"!'
@@ -74,7 +76,7 @@ class MVSDatasetDTU(Dataset):
         self.id_list = np.unique(self.id_list)
         self.build_remap()
 
-    def build_proj_mats(self):
+    def build_proj_mats1(self):
         proj_mats, intrinsics, world2cams, cam2worlds = [], [], [], []
         for vid in self.id_list:
             proj_mat_filename = os.path.join(self.root_dir,
@@ -91,12 +93,118 @@ class MVSDatasetDTU(Dataset):
             intrinsic[:2] = intrinsic[:2] / 4
             proj_mat_l[:3, :4] = intrinsic @ extrinsic[:3, :4]
 
+            # print(extrinsic.shape)
+            # print(intrinsic.shape)
+
             proj_mats += [(proj_mat_l, near_far)]
             world2cams += [extrinsic]
             cam2worlds += [np.linalg.inv(extrinsic)]
 
         self.proj_mats, self.intrinsics = np.stack(proj_mats), np.stack(intrinsics)
         self.world2cams, self.cam2worlds = np.stack(world2cams), np.stack(cam2worlds)
+
+    def build_proj_mats(self):
+        proj_mats, intrinsics, world2cams, cam2worlds = [], [], [], []
+        for vid in self.id_list:
+        # for vid in np.zeros_like(self.id_list):
+            proj_mat_filename = os.path.join(self.root_dir,
+                                             f'Cameras/train/{vid:08d}_cam.txt')
+            intrinsic, extrinsic, near_far = self.read_cam_file(proj_mat_filename)
+
+            # print(intrinsic)
+            # print(extrinsic)
+            # print(intrinsic @ extrinsic[:3,:4] @ self.scale_mat)
+
+            # intrinsic[:2] *= 4
+            # extrinsic = extrinsic @ self.scale_mat
+            # extrinsic1 = extrinsic.copy()
+            # extrinsic1[:3, 3] *= self.scale_factor
+
+            # print(self.downSample)
+            intrinsic[:2] = intrinsic[:2] * self.downSample
+
+            # near_far = near_far / self.scale_mat[0,0]
+
+            
+
+            # multiply intrinsics and extrinsics to get projection matrix
+            # proj_mat_l = np.eye(4)
+            # intrinsic[:2] = intrinsic[:2] / 4
+            # proj_mat_l[:3, :4] = intrinsic @ extrinsic1[:3, :4]
+
+            proj_mat_l = np.eye(4)
+            proj_mat_l[:3, :4] = intrinsic @ extrinsic[:3, :4] @ self.scale_mat
+
+            # intr, extr = self.load_K_Rt_from_P(None, proj_mat_l[:3, :4])
+            intr, pose = self.load_K_Rt_from_P(None, proj_mat_l[:3, :4])
+            extr = np.linalg.inv(pose)
+
+            intr1, pose1 = self.load_K_Rt_from_P(None, intr[:3,:3] @ extr[:3, :4])
+            extr1 = np.linalg.inv(pose1)
+
+            # proj_mat_l = intr1[:3,:3] @ extr1[:3, :4]
+
+            # print(intr[:3,:3] @ extr[:3, :4])
+            # print(intr1[:3,:3] @ extr1[:3, :4])
+            # print(proj_mat_l)
+
+            # print(intrinsic)
+            # print(extrinsic)
+            # print(intr)
+            # print(extr)
+            # print(intr1)
+            # print(extr1)
+            # print("\n")
+
+            intrinsic = intr1[:3,:3]
+            extrinsic = extr1
+
+            intrinsic[:2] *= 4
+
+            # print(extrinsic.shape)
+            # print(intrinsic.shape)
+
+            # W, H = 640, 512
+            # near ,far = near_far_from_sphere_pose(np.linalg.inv(extrinsic), intrinsic, W, H)
+            # near_far = [near,far]
+
+            near_far = np.array(near_far)
+            near_far = near_far / self.scale_factor
+            near_far = near_far / self.scale_mat[0][0]
+
+            # extrinsic = extrinsic @ self.scale_mat
+
+            proj_mats += [(proj_mat_l, near_far)]
+            world2cams += [extrinsic]
+            cam2worlds += [np.linalg.inv(extrinsic)]
+            intrinsics += [intrinsic]
+
+        self.proj_mats, self.intrinsics = np.stack(proj_mats), np.stack(intrinsics)
+        self.world2cams, self.cam2worlds = np.stack(world2cams), np.stack(cam2worlds)
+
+    # This function is borrowed from IDR: https://github.com/lioryariv/idr
+    def load_K_Rt_from_P(self, filename, P=None):
+        if P is None:
+            lines = open(filename).read().splitlines()
+            if len(lines) == 4:
+                lines = lines[1:]
+            lines = [[x[0], x[1], x[2], x[3]] for x in (x.split(" ") for x in lines)]
+            P = np.asarray(lines).astype(np.float32).squeeze()
+
+        out = cv2.decomposeProjectionMatrix(P)
+        K = out[0]
+        R = out[1]
+        t = out[2]
+
+        K = K / K[2, 2]
+        intrinsics = np.eye(4)
+        intrinsics[:3, :3] = K
+
+        pose = np.eye(4, dtype=np.float32)
+        pose[:3, :3] = R.transpose()
+        pose[:3, 3] = (t[:3] / t[3])[:, 0]
+
+        return intrinsics, pose
 
     def read_cam_file(self, filename):
         with open(filename) as f:
@@ -148,6 +256,7 @@ class MVSDatasetDTU(Dataset):
         imgs, depths_h = [], []
         proj_mats, intrinsics, w2cs, c2ws, near_fars = [], [], [], [], []  # record proj mats between views
         for i, vid in enumerate(view_ids):
+        # for i, vid in enumerate([0,0,0]):
 
             # NOTE that the id in image file names is from 1 to 49 (not 0~48)
             img_filename = os.path.join(self.root_dir,
@@ -157,6 +266,7 @@ class MVSDatasetDTU(Dataset):
 
             img = Image.open(img_filename)
             img_wh = np.round(np.array(img.size) * self.downSample).astype('int')
+            # print(img_wh)
             img = img.resize(img_wh, Image.BILINEAR)
             img = self.transform(img)
             imgs += [img]

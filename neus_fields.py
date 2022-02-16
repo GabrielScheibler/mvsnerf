@@ -2,13 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from models.embedder import get_embedder
+from neus_embedder import get_embedder
 
 
 # This implementation is borrowed from IDR: https://github.com/lioryariv/idr
 class SDFNetwork(nn.Module):
     def __init__(self,
                  d_in,
+                 d_feature,
                  d_out,
                  d_hidden,
                  n_layers,
@@ -21,14 +22,14 @@ class SDFNetwork(nn.Module):
                  inside_outside=False):
         super(SDFNetwork, self).__init__()
 
-        dims = [d_in] + [d_hidden for _ in range(n_layers)] + [d_out]
+        dims = [d_in + d_feature] + [d_hidden for _ in range(n_layers)] + [d_out]
 
         self.embed_fn_fine = None
 
         if multires > 0:
             embed_fn, input_ch = get_embedder(multires, input_dims=d_in)
             self.embed_fn_fine = embed_fn
-            dims[0] = input_ch
+            dims[0] = input_ch + d_feature
 
         self.num_layers = len(dims)
         self.skip_in = skip_in
@@ -69,10 +70,12 @@ class SDFNetwork(nn.Module):
 
         self.activation = nn.Softplus(beta=100)
 
-    def forward(self, inputs):
+    def forward(self, inputs, features):
         inputs = inputs * self.scale
         if self.embed_fn_fine is not None:
             inputs = self.embed_fn_fine(inputs)
+
+        inputs = torch.cat([inputs,features], dim=-1)
 
         x = inputs
         for l in range(0, self.num_layers - 1):
@@ -87,15 +90,16 @@ class SDFNetwork(nn.Module):
                 x = self.activation(x)
         return torch.cat([x[:, :1] / self.scale, x[:, 1:]], dim=-1)
 
-    def sdf(self, x):
-        return self.forward(x)[:, :1]
+    def sdf(self, x, f):
+        return self.forward(x, f)[:, :1]
 
-    def sdf_hidden_appearance(self, x):
-        return self.forward(x)
+    def sdf_hidden_appearance(self, x, f):
+        return self.forward(x, f)
 
-    def gradient(self, x):
-        x.requires_grad_(True)
-        y = self.sdf(x)
+    def gradient(self, x, f):
+        with torch.set_grad_enabled(True):
+            x.requires_grad_(True)
+            y = self.sdf(x, f)
         d_output = torch.ones_like(y, requires_grad=False, device=y.device)
         gradients = torch.autograd.grad(
             outputs=y,
@@ -178,6 +182,7 @@ class NeRF(nn.Module):
                  D=8,
                  W=256,
                  d_in=3,
+                 d_feature=20,
                  d_in_view=3,
                  multires=0,
                  multires_view=0,
@@ -193,6 +198,7 @@ class NeRF(nn.Module):
         self.input_ch_view = 3
         self.embed_fn = None
         self.embed_fn_view = None
+        self.d_feature = d_feature
 
         if multires > 0:
             embed_fn, input_ch = get_embedder(multires, input_dims=d_in)
@@ -208,7 +214,7 @@ class NeRF(nn.Module):
         self.use_viewdirs = use_viewdirs
 
         self.pts_linears = nn.ModuleList(
-            [nn.Linear(self.input_ch, W)] +
+            [nn.Linear(self.input_ch + self.d_feature, W)] +
             [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + self.input_ch, W) for i in range(D - 1)])
 
         ### Implementation according to the official code release
@@ -226,13 +232,13 @@ class NeRF(nn.Module):
         else:
             self.output_linear = nn.Linear(W, output_ch)
 
-    def forward(self, input_pts, input_views):
+    def forward(self, input_pts, input_views, input_features):
         if self.embed_fn is not None:
             input_pts = self.embed_fn(input_pts)
         if self.embed_fn_view is not None:
             input_views = self.embed_fn_view(input_views)
 
-        h = input_pts
+        h = torch.cat([input_pts, input_features], dim=-1)
         for i, l in enumerate(self.pts_linears):
             h = self.pts_linears[i](h)
             h = F.relu(h)
@@ -260,4 +266,4 @@ class SingleVarianceNetwork(nn.Module):
         self.register_parameter('variance', nn.Parameter(torch.tensor(init_val)))
 
     def forward(self, x):
-        return torch.ones([len(x), 1]) * torch.exp(self.variance * 10.0)
+        return torch.ones([len(x), 1]).cuda() * torch.exp(self.variance * 10.0)
