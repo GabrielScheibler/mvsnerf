@@ -152,14 +152,14 @@ def rendering(args, pose_ref, rays_pts, rays_ndc, depth_candidates, rays_o, rays
     input_feat = gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_ndc, args.feat_dim, \
                                img_feat, args.img_downscale, args.use_color_volume, args.net_type)
 
-    rays_dir_n = rays_dir/cos_angle.unsqueeze(-1)
-    rays_dir_n = rays_dir_n[:, None, :].expand(-1,rays_pts.shape[1],-1)
-    angle = angle[:, None, :].expand(-1,rays_pts.shape[1],-1)
-    pts = world_to_sdf_input_space(pose_ref, rays_pts, inv_scale)
-    dirs = world_to_sdf_input_space_dirs(pose_ref, rays_dir_n, inv_scale)
+    # rays_dir_n = rays_dir/cos_angle.unsqueeze(-1)
+    # rays_dir_n = rays_dir_n[:, None, :].expand(-1,rays_pts.shape[1],-1)
+    # angle = angle[:, None, :].expand(-1,rays_pts.shape[1],-1)
+    # pts = world_to_sdf_input_space(pose_ref, rays_pts, inv_scale)
+    # dirs = world_to_sdf_input_space_dirs(pose_ref, rays_dir_n, inv_scale)
 
     # rays_ndc = rays_ndc * 2 - 1.0
-    raw = network_query_fn(pts, dirs, input_feat, network_fn)
+    raw = network_query_fn(rays_pts, angle, input_feat, network_fn)
     if raw.shape[-1]>4:
         input_feat = torch.cat((input_feat[...,:8],raw[...,4:]), dim=-1)
 
