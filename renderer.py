@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from utils import normal_vect, index_point_feature, build_color_volume
+from utils import normal_vect, index_point_feature, build_color_volume, world_to_sdf_input_space, world_to_sdf_input_space_dirs
 
 def depth2dist(z_vals, cos_angle):
     # z_vals: [N_ray N_sample]
@@ -135,7 +135,7 @@ def gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_ndc, feat_dim, 
         input_feat = index_point_feature(volume_feature, rays_ndc) if torch.is_tensor(volume_feature) else volume_feature(rays_ndc)
     return input_feat
 
-def rendering(args, pose_ref, rays_pts, rays_ndc, depth_candidates, rays_o, rays_dir,
+def rendering(args, pose_ref, rays_pts, rays_ndc, depth_candidates, rays_o, rays_dir, inv_scale,
               volume_feature=None, imgs=None, network_fn=None, img_feat=None, network_query_fn=None, white_bkgd=False, **kwargs):
 
     # rays angle
@@ -152,8 +152,14 @@ def rendering(args, pose_ref, rays_pts, rays_ndc, depth_candidates, rays_o, rays
     input_feat = gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_ndc, args.feat_dim, \
                                img_feat, args.img_downscale, args.use_color_volume, args.net_type)
 
+    rays_dir_n = rays_dir/cos_angle.unsqueeze(-1)
+    rays_dir_n = rays_dir_n[:, None, :].expand(-1,rays_pts.shape[1],-1)
+    angle = angle[:, None, :].expand(-1,rays_pts.shape[1],-1)
+    pts = world_to_sdf_input_space(pose_ref, rays_pts, inv_scale)
+    dirs = world_to_sdf_input_space_dirs(pose_ref, rays_dir_n, inv_scale)
+
     # rays_ndc = rays_ndc * 2 - 1.0
-    raw = network_query_fn(rays_ndc, angle, input_feat, network_fn)
+    raw = network_query_fn(pts, dirs, input_feat, network_fn)
     if raw.shape[-1]>4:
         input_feat = torch.cat((input_feat[...,:8],raw[...,4:]), dim=-1)
 

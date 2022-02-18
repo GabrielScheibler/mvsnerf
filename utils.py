@@ -1,5 +1,6 @@
 import os, torch, cv2, re
 import numpy as np
+import math
 
 
 from PIL import Image
@@ -144,6 +145,48 @@ def get_ndc_coordinate(w2c_ref, intrinsic_ref, point_samples, inv_scale, near=2,
 
     point_samples_pixel = point_samples_pixel.view(N_rays, N_samples, 3)
     return point_samples_pixel
+
+def inverse_get_ndc_coordinate(c2w_ref, intrinsic_ref, point_samples_pixel, inv_scale, near=2, far=6, pad=0, lindisp=False):
+    '''
+        point_samples [N_rays N_sample 3]
+    '''
+    #TODO make differentiable
+
+    N_rays, N_samples = point_samples_pixel.shape[:2]
+    point_samples_pixel = point_samples_pixel.reshape(-1, 3)
+
+    # print(point_samples)
+
+    if pad>0:
+        W_feat, H_feat = (inv_scale+1)/4.0
+        point_samples_pixel[:,1] = (point_samples_pixel[:,1] - pad / (H_feat + pad * 2)) / H_feat * (H_feat + pad * 2) 
+        point_samples_pixel[:,0] = (point_samples_pixel[:,0] - pad / (W_feat + pad * 2)) / W_feat * (W_feat + pad * 2) 
+
+    if intrinsic_ref is not None:
+        # using projection
+        # point_samples_pixel = point_samples_pixel * [[1,1,(far - near)]] + [[0,0,near]]
+        # eye = torch.eye(3)
+        # eye[2,0] = -1
+        # eye[1,0]
+        # points_samples_pixel = point_samples_pixel * point_samples_pixel[:,-1:] @ [[1,0,0],[0,1,0],[0,0,1]]
+
+        point_samples_pixel[:,2] = (point_samples_pixel[:,2]) * (far - near) + near  # normalize to near~far
+        point_samples_pixel[:,:2] = (point_samples_pixel[:,:2] * point_samples_pixel[:,-1:]) * inv_scale.reshape(1,2)  # normalize to W,H
+        point_samples =  point_samples_pixel @ torch.tensor(np.linalg.inv(intrinsic_ref.cpu())).t().cuda()
+    else:
+        near, far = near.view(1,3), far.view(1,3)
+        point_samples_pixel = point_samples_pixel * (far - near) + near  # normalize to 0~1
+
+    # wrap to ref view
+    if c2w_ref is not None:
+        R = c2w_ref[:3, :3]  # (3, 3)
+        T = c2w_ref[:3, 3:]  # (3, 1)
+        point_samples = torch.matmul(point_samples, R.t()) + T.reshape(1,3)
+        # print(point_samples)
+        # print(torch.sum(point_samples * point_samples, dim=-1))
+
+    point_samples = point_samples.view(N_rays, N_samples, 3)
+    return point_samples
 
 def build_rays(imgs, depths, pose_ref, w2cs, c2ws, intrinsics, near_fars, N_rays, N_samples, pad=0, is_precrop_iters=False, ref_idx=0, importanceSampling=False, with_depth=False, is_volume=False):
     '''
@@ -709,3 +752,121 @@ def get_nearest_pose_ids(tar_pose, ref_poses, num_select):
     sorted_ids = np.argsort(dists, axis=-1)
     selected_ids = sorted_ids[:,:num_select]
     return selected_ids
+
+
+
+
+
+
+def rotate_unitsphere(pose_ref, point_samples, ref_idx=0):
+    '''
+        point_samples [N_rays N_sample 3]
+    '''
+
+    c2w_ref = pose_ref['c2ws'][ref_idx]
+
+    N_rays, N_samples = point_samples.shape[:2]
+    point_samples = point_samples.reshape(-1, 3)
+
+    camera_pos = c2w_ref[:3,3]
+    ay = math.atan2(camera_pos[0],camera_pos[2])
+    camera_pos_ry = rotate_2d(1, camera_pos, ay)
+    ax = math.atan2(camera_pos_ry[1],camera_pos_ry[2])
+    # camera_pos_ry_rx = rotate_2d(0, camera_pos_ry, ax)
+
+    point_samples = rotate_2d(1, point_samples, ay)
+    point_samples = rotate_2d(0, point_samples, ax)
+    
+    point_samples = point_samples.view(N_rays, N_samples, 3)
+
+    return point_samples
+
+def inverse_rotate_unitsphere(pose_ref, point_samples, ref_idx=0):
+    '''
+        point_samples [N_rays N_sample 3]
+    '''
+
+    c2w_ref = pose_ref['c2ws'][ref_idx]
+
+    N_rays, N_samples = point_samples.shape[:2]
+    point_samples = point_samples.reshape(-1, 3)
+
+    camera_pos = c2w_ref[:3,3]
+    ay = math.atan2(camera_pos[0],camera_pos[2])
+    camera_pos_ry = rotate_2d(1, camera_pos, ay)
+    ax = math.atan2(camera_pos_ry[1],camera_pos_ry[2])
+    # camera_pos_ry_rx = rotate_2d(0, camera_pos_ry, ax)
+
+    point_samples = rotate_2d(0, point_samples, -ax)
+    point_samples = rotate_2d(1, point_samples, -ay)
+    
+    point_samples = point_samples.view(N_rays, N_samples, 3)
+
+    return point_samples
+
+def rotate_2d(axis, points, angle):
+    """
+    Rotate a point counterclockwise by a given angle around a given origin.
+
+    The angle should be given in radians.
+    """
+    sina = math.sin(angle)
+    cosa= math.cos(angle)
+
+    R = torch.eye(3).cuda()
+    if axis == 0:
+        R[1,1],R[1,2],R[2,1],R[2,2] = cosa,sina,-sina,cosa
+    elif axis == 1:
+        R[0,0],R[0,2],R[2,0],R[2,2] = cosa,sina,-sina,cosa
+    else:
+        R[0,0],R[0,1],R[1,0],R[1,1] = cosa,sina,-sina,cosa
+
+    points = points @ R
+
+    return points
+
+def world_to_sdf_input_space(pose_ref, point_samples, inv_scale=None):
+    ref_idx = 0
+    pad = 24
+    # points = points_w2c_unitspshere(pose_ref, point_samples, inv_scale, ref_idx)
+    # points = get_ndc_coordinate(pose_ref['w2cs'][ref_idx], pose_ref['intrinsics'][ref_idx], point_samples, inv_scale, near=pose_ref['near_fars'][ref_idx][0], far=pose_ref['near_fars'][ref_idx][1], pad=pad)
+    points = rotate_unitsphere(pose_ref, point_samples, ref_idx)
+    # points = point_samples
+    return points
+
+def world_to_sdf_input_space_dirs(pose_ref, point_samples, inv_scale=None): 
+    zero_points = torch.zeros_like(point_samples)
+    dir_points = world_to_sdf_input_space(pose_ref, point_samples, inv_scale)
+    zero_points = world_to_sdf_input_space(pose_ref, zero_points, inv_scale)
+    dirs = dir_points - zero_points
+
+    # dirs = dirs / (torch.sum(dirs, dim=-1, keepdim=True) + 1e-5)
+
+    # ref_idx = 0
+    # nr,ns,_ = point_samples.shape
+    # dirs = point_samples.reshape(-1, 3) @ pose_ref['w2cs'][ref_idx][:3,:3].t()
+    # dirs = dirs.reshape(nr, ns, 3)
+    return dirs
+
+def sdf_input_space_to_world(pose_ref, point_samples, inv_scale=None):
+    ref_idx = 0
+    pad = 24
+    # points = points_c2w_unitspshere(pose_ref, point_samples, inv_scale, ref_idx)
+    # points = inverse_get_ndc_coordinate(pose_ref['c2ws'][ref_idx], pose_ref['intrinsics'][ref_idx], point_samples, inv_scale, near=pose_ref['near_fars'][ref_idx][0], far=pose_ref['near_fars'][ref_idx][1], pad=pad)
+    points = inverse_rotate_unitsphere(pose_ref, point_samples, ref_idx)
+    # points = point_samples
+    return points
+
+def sdf_input_space_to_world_dirs(pose_ref, point_samples, inv_scale=None):
+    zero_points = torch.zeros_like(point_samples)
+    dir_points = sdf_input_space_to_world(pose_ref, point_samples, inv_scale)
+    zero_points = sdf_input_space_to_world(pose_ref, zero_points, inv_scale)
+    dirs = dir_points - zero_points
+
+    # dirs = dirs / (torch.sum(dirs, dim=-1, keepdim=True) + 1e-5)
+
+    # ref_idx = 0
+    # nr,ns,_ = point_samples.shape
+    # dirs = point_samples.reshape(-1, 3) @ pose_ref['c2ws'][ref_idx][:3,:3].t()
+    # dirs = dirs.reshape(nr, ns, 3)
+    return dirs
