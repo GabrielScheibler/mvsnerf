@@ -541,7 +541,31 @@ class Renderer_Neus(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, input_ch_feat=8, skips=[4], use_viewdirs=False):
         """
         """
-        super(Renderer_linear, self).__init__()
+        super(Renderer_Neus, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.skips = skips
+        self.use_viewdirs = use_viewdirs
+        self.in_ch_pts, self.in_ch_views, self.in_ch_feat = input_ch, input_ch_views, input_ch_feat
+
+        self.nerf_fg = Renderer_Neus_Foreground(D, W, input_ch, input_ch_views, output_ch, input_ch_feat, skips, use_viewdirs)
+        self.nerf_bg = Renderer_Neus_Background(D, W, input_ch, input_ch_views, output_ch, input_ch_feat, skips, use_viewdirs)
+
+    def forward_fg(self, x):
+        outputs = self.nerf_fg(x)
+        return outputs
+
+    def forward_bg(self, x):
+        outputs = self.nerf_bg(x)
+        return outputs
+
+class Renderer_Neus_Background(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, input_ch_feat=8, skips=[4], use_viewdirs=False):
+        """
+        """
+        super(Renderer_Neus_Background, self).__init__()
         self.D = D
         self.W = W
         self.input_ch = input_ch
@@ -581,6 +605,84 @@ class Renderer_Neus(nn.Module):
                 h = torch.cat([input_pts, h], -1)
 
         alpha = self.alpha_linear(h)
+        print("using non-functional forward_alpha method")
+        return alpha
+
+    def forward(self, x):
+        dim = x.shape[-1]
+        in_ch_feat = dim-self.in_ch_pts-self.in_ch_views
+        input_pts, input_feats, input_views = torch.split(x, [self.in_ch_pts, in_ch_feat, self.in_ch_views], dim=-1)
+
+        h = input_pts
+        bias = self.pts_bias(input_feats) #if in_ch_feat == self.in_ch_feat else  input_feats
+        for i, l in enumerate(self.pts_linears):
+            h = self.pts_linears[i](h) + bias
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([input_pts, h], -1)
+
+
+        if self.use_viewdirs:
+            alpha = torch.relu(self.alpha_linear(h))
+            feature = self.feature_linear(h)
+            h = torch.cat([feature, input_views], -1)
+
+            for i, l in enumerate(self.views_linears):
+                h = self.views_linears[i](h)
+                h = F.relu(h)
+
+            rgb = torch.sigmoid(self.rgb_linear(h))
+            outputs = torch.cat([rgb, alpha], -1)
+        else:
+            outputs = self.output_linear(h)
+
+        return outputs
+
+class Renderer_Neus_Foreground(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, input_ch_feat=8, skips=[4], use_viewdirs=False):
+        """
+        """
+        super(Renderer_Neus_Foreground, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.skips = skips
+        self.use_viewdirs = use_viewdirs
+        self.in_ch_pts, self.in_ch_views, self.in_ch_feat = input_ch, input_ch_views, input_ch_feat
+
+        self.pts_linears = nn.ModuleList(
+            [nn.Linear(input_ch, W, bias=True)] + [nn.Linear(W, W, bias=True) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
+        self.pts_bias = nn.Linear(input_ch_feat, W)
+        self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)])
+
+        if use_viewdirs:
+            self.feature_linear = nn.Linear(W, W)
+            self.alpha_linear = nn.Linear(W, 1)
+            self.rgb_linear = nn.Linear(W//2, 3)
+        else:
+            self.output_linear = nn.Linear(W, output_ch)
+
+        self.pts_linears.apply(weights_init)
+        self.views_linears.apply(weights_init)
+        self.feature_linear.apply(weights_init)
+        self.alpha_linear.apply(weights_init)
+        self.rgb_linear.apply(weights_init)
+
+    def forward_alpha(self,x):
+        dim = x.shape[-1]
+        input_pts, input_feats = torch.split(x, [self.in_ch_pts, self.in_ch_feat], dim=-1)
+
+        h = input_pts
+        bias = self.pts_bias(input_feats)
+        for i, l in enumerate(self.pts_linears):
+            h = self.pts_linears[i](h) + bias
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([input_pts, h], -1)
+
+        alpha = self.alpha_linear(h)
+        print("using non-functional forward_alpha method")
         return alpha
 
     def forward(self, x):
@@ -634,12 +736,24 @@ class MVSNeRF(nn.Module):
             self.nerf = Renderer_linear(D=D, W=W,input_ch_feat=input_ch_feat,
                      input_ch=input_ch_pts, output_ch=4, skips=skips,
                      input_ch_views=input_ch_views, use_viewdirs=True)
+        elif 'v3' == net_type:
+            self.nerf = Renderer_Neus(D=D, W=W,input_ch_feat=input_ch_feat,
+                     input_ch=input_ch_pts, output_ch=4, skips=skips,
+                     input_ch_views=input_ch_views, use_viewdirs=True)
 
     def forward_alpha(self, x):
         return self.nerf.forward_alpha(x)
 
     def forward(self, x):
         RGBA = self.nerf(x)
+        return RGBA
+
+    def forward_fg(self, x):
+        RGBA = self.nerf.forward_fg(x)
+        return RGBA
+
+    def forward_bg(self, x):
+        RGBA = self.nerf.forward_bg(x)
         return RGBA
 
 def create_nerf_mvs(args, pts_embedder=True, use_mvs=False, dir_embedder=True):

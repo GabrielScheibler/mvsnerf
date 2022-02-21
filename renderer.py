@@ -91,6 +91,40 @@ def raw2outputs(raw, z_vals, dists, white_bkgd=False, net_type='v2'):
         rgb_map = rgb_map + (1. - acc_map[..., None])
     return rgb_map, disp_map, acc_map, weights, depth_map, alpha
 
+def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, white_bkgd=False, net_type='v2'):
+    """Transforms model's predictions to semantically meaningful values.
+    Args:
+        raw: [num_rays, num_samples along ray, 4]. Prediction from model.
+        z_vals: [num_rays, num_samples along ray]. Integration time.
+        rays_d: [num_rays, 3]. Direction of each ray.
+    Returns:
+        rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
+        disp_map: [num_rays]. Disparity map. Inverse of depth map.
+        acc_map: [num_rays]. Sum of weights along each ray.
+        weights: [num_rays, num_samples]. Weights assigned to each sampled color.
+        depth_map: [num_rays]. Estimated distance to object.
+    """
+    #TODO combine tow outputs in here
+    device = z_vals.device
+
+    rgb_fg = raw_fg[..., :3] # [N_rays, N_samples, 3]
+    alpha_fg, weights_fg, alpha_softmax_fg = raw2alpha(raw_fg[..., 3], dists, net_type)  # [N_rays, N_samples]
+    weights_fg = weights_fg * inside_sphere
+
+    rgb_bg = raw_bg[..., :3] # [N_rays, N_samples, 3]
+    alpha_bg, weights_bg, alpha_softmax_bg = raw2alpha(raw_bg[..., 3], dists, net_type)  # [N_rays, N_samples]
+    weights_bg = weights_bg * (1-inside_sphere)
+
+    rgb_map = torch.sum(weights_fg[..., None] * rgb_fg, -2) + torch.sum(weights_bg[..., None] * rgb_bg, -2) # [N_rays, 3]
+    depth_map = torch.sum(weights_fg * z_vals, -1) + torch.sum(weights_bg * z_vals, -1)
+
+    disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map, device=device), depth_map / (torch.sum(weights_fg, -1)+torch.sum(weights_bg, -1)))
+    acc_map = torch.sum(weights_fg, -1) + torch.sum(weights_bg, -1)
+
+    if white_bkgd:
+        rgb_map = rgb_map + (1. - acc_map[..., None])
+    return rgb_map, disp_map, acc_map, weights_fg + weights_bg, depth_map, alpha_fg + alpha_bg
+
 
 
 def gen_angle_feature(c2ws, rays_pts, rays_dir):
@@ -138,6 +172,8 @@ def gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_ndc, feat_dim, 
 def rendering(args, pose_ref, rays_pts, rays_ndc, depth_candidates, rays_o, rays_dir, inv_scale,
               volume_feature=None, imgs=None, network_fn=None, img_feat=None, network_query_fn=None, white_bkgd=False, **kwargs):
 
+    batch_size, n_samples, _ = rays_pts.size()
+
     # rays angle
     cos_angle = torch.norm(rays_dir, dim=-1)
 
@@ -159,7 +195,29 @@ def rendering(args, pose_ref, rays_pts, rays_ndc, depth_candidates, rays_o, rays
     # dirs = world_to_sdf_input_space_dirs(pose_ref, rays_dir_n, inv_scale)
 
     # rays_ndc = rays_ndc * 2 - 1.0
-    raw = network_query_fn(rays_pts, angle, input_feat, network_fn)
+    if args.net_type is 'v3':
+        #TODO Neus rendering here
+        pts_norm = torch.linalg.norm(rays_pts, ord=2, dim=-1, keepdim=True)
+        inside_sphere = (pts_norm < 1.0).float().detach()
+        relax_inside_sphere = (pts_norm < 1.2).float().detach()
+        raw_fg = network_query_fn(rays_ndc, angle, input_feat, network_fn.forward_fg)
+        raw_bg = network_query_fn(rays_ndc, angle, input_feat, network_fn.forward_bg)
+        # print(rays_pts.size())
+        # print(rays_ndc.size())
+        # print(rays_dir.size())
+        # print(rays_o.size())
+            
+        if raw.shape[-1]>4:
+            input_feat = torch.cat((input_feat[...,:8],raw[...,4:]), dim=-1)
+
+        dists = depth2dist(depth_candidates, cos_angle)
+        # dists = ndc2dist(rays_ndc)
+        rgb_map, disp_map, acc_map, weights, depth_map, alpha = raw2outputs_neus(raw_fg, raw_bg, depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
+        ret = {}
+        return rgb_map, input_feat, weights, depth_map, alpha, ret
+
+
+    raw = network_query_fn(rays_ndc, angle, input_feat, network_fn)
     if raw.shape[-1]>4:
         input_feat = torch.cat((input_feat[...,:8],raw[...,4:]), dim=-1)
 

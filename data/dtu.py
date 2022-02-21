@@ -75,7 +75,7 @@ class MVSDatasetDTU(Dataset):
         self.id_list = np.unique(self.id_list)
         self.build_remap()
 
-    def build_proj_mats1(self):
+    def build_proj_mats(self):
         proj_mats, intrinsics, world2cams, cam2worlds = [], [], [], []
         for vid in self.id_list:
             proj_mat_filename = os.path.join(self.root_dir,
@@ -99,7 +99,7 @@ class MVSDatasetDTU(Dataset):
         self.proj_mats, self.intrinsics = np.stack(proj_mats), np.stack(intrinsics)
         self.world2cams, self.cam2worlds = np.stack(world2cams), np.stack(cam2worlds)
 
-    def build_proj_mats(self):
+    def build_proj_mats1(self):
         proj_mats, intrinsics, world2cams, cam2worlds = [], [], [], []
         for vid in self.id_list:
             proj_mat_filename = os.path.join(self.root_dir,
