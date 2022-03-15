@@ -870,3 +870,25 @@ def sdf_input_space_to_world_dirs(pose_ref, point_samples, inv_scale=None):
     # dirs = point_samples.reshape(-1, 3) @ pose_ref['c2ws'][ref_idx][:3,:3].t()
     # dirs = dirs.reshape(nr, ns, 3)
     return dirs
+
+def print_frustum(pose_ref, inv_scale, ref_idx=0):
+
+    intrinsic_ref = pose_ref['intrinsics'][ref_idx]
+    near, far = pose_ref['near_fars'][ref_idx]
+    w2c_ref = pose_ref['w2cs'][ref_idx]
+    c2w_ref = pose_ref['c2ws'][ref_idx]
+
+    lindisp = False
+    pad = 0
+
+    frustum_corners_ndc = torch.tensor([[[-1,-1,0],[-1,-1,1],[1,1,0],[1,1,1],[0,0,0],[0,0,0.5],[0,0,1]]]).cuda()
+    frustum_corners_world = inverse_get_ndc_coordinate(c2w_ref, intrinsic_ref, frustum_corners_ndc, inv_scale, near, far)
+    frustum_corners_world = frustum_corners_world.squeeze()
+    scale = torch.sum((frustum_corners_world[5,:] - frustum_corners_world[1,:])**2)
+    frustum_middle_world = frustum_corners_world[5,:]
+    direction_world = frustum_corners_world[6,:] - frustum_corners_world[5,:]
+    direction_world = direction_world / direction_world.abs().sum()
+    camera_pos_world = c2w_ref[:3,3]
+
+    print(frustum_corners_world)
+    return

@@ -9,6 +9,7 @@ import torch
 from torchvision import transforms as T
 import torchvision.transforms.functional as F
 
+
 def colorjitter(img, factor):
     # brightness_factor,contrast_factor,saturation_factor,hue_factor
     # img = F.adjust_brightness(img, factor[0])
@@ -32,7 +33,10 @@ class MVSDatasetDTU(Dataset):
         self.img_wh = img_wh
         self.downSample = downSample
         self.scale_factor = 1.0 / 200
-        self.scale_mat = [[246.40544,0.0,0.0,-37.542286],[0.0,246.40544,0.0,-42.644344],[0.0,0.0,246.40544,653.20886],[0.0,0.0,0.0,1.0]]
+        self.scale_mat = np.array([[246.40544, 0.0, 0.0, -37.542286],
+                                   [0.0, 246.40544, 0.0, -42.644344],
+                                   [0.0, 0.0, 246.40544, 653.20886],
+                                   [0.0, 0.0, 0.0, 1.0]])
         self.max_len = max_len
         if img_wh is not None:
             assert img_wh[0] % 32 == 0 and img_wh[1] % 32 == 0, \
@@ -74,13 +78,15 @@ class MVSDatasetDTU(Dataset):
 
         self.id_list = np.unique(self.id_list)
         self.build_remap()
-
-    def build_proj_mats(self):
+    
+    def build_proj_mats_original(self):
         proj_mats, intrinsics, world2cams, cam2worlds = [], [], [], []
         for vid in self.id_list:
             proj_mat_filename = os.path.join(self.root_dir,
                                              f'Cameras/train/{vid:08d}_cam.txt')
-            intrinsic, extrinsic, near_far = self.read_cam_file(proj_mat_filename)
+            intrinsic, extrinsic, near_far = self.read_cam_file(
+                proj_mat_filename)
+
             intrinsic[:2] *= 4
             extrinsic[:3, 3] *= self.scale_factor
 
@@ -96,29 +102,30 @@ class MVSDatasetDTU(Dataset):
             world2cams += [extrinsic]
             cam2worlds += [np.linalg.inv(extrinsic)]
 
-        self.proj_mats, self.intrinsics = np.stack(proj_mats), np.stack(intrinsics)
-        self.world2cams, self.cam2worlds = np.stack(world2cams), np.stack(cam2worlds)
+        self.proj_mats, self.intrinsics = np.stack(
+            proj_mats), np.stack(intrinsics)
+        self.world2cams, self.cam2worlds = np.stack(
+            world2cams), np.stack(cam2worlds)
 
-    def build_proj_mats1(self):
+    def build_proj_mats(self):
         proj_mats, intrinsics, world2cams, cam2worlds = [], [], [], []
         for vid in self.id_list:
             proj_mat_filename = os.path.join(self.root_dir,
                                              f'Cameras/train/{vid:08d}_cam.txt')
-            intrinsic, extrinsic, near_far = self.read_cam_file(proj_mat_filename)
-           
+            intrinsic, extrinsic, near_far = self.read_cam_file(
+                proj_mat_filename)
+
+            #rotate translation vector from scale matrix to camera space
+            t = extrinsic[:3,:3] @ self.scale_mat[:3,-1]
+            #add translation vector to extrinsic matrix translation
+            extrinsic[:3,-1] += t
+            #scale the new extrinsic matrix translation vector by the scaling factor
+            extrinsic[:3, 3] /= self.scale_mat[0,0]
+            
             intrinsic[:2] = intrinsic[:2] * self.downSample
 
             proj_mat_l = np.eye(4)
-            proj_mat_l[:3, :4] = intrinsic @ extrinsic[:3, :4] @ self.scale_mat
-
-            intr, pose = self.load_K_Rt_from_P(None, proj_mat_l[:3, :4])
-            extr = np.linalg.inv(pose)
-
-            intr1, pose1 = self.load_K_Rt_from_P(None, intr[:3,:3] @ extr[:3, :4])
-            extr1 = np.linalg.inv(pose1)
-
-            intrinsic = intr1[:3,:3]
-            extrinsic = extr1
+            proj_mat_l[:3, :4] = intrinsic @ extrinsic[:3, :4]
 
             intrinsic[:2] *= 4
 
@@ -129,10 +136,12 @@ class MVSDatasetDTU(Dataset):
             proj_mats += [(proj_mat_l, near_far)]
             world2cams += [extrinsic]
             cam2worlds += [np.linalg.inv(extrinsic)]
-            intrinsics += [intrinsic]
+            intrinsics += [intrinsic.copy()]
 
-        self.proj_mats, self.intrinsics = np.stack(proj_mats), np.stack(intrinsics)
-        self.world2cams, self.cam2worlds = np.stack(world2cams), np.stack(cam2worlds)
+        self.proj_mats, self.intrinsics = np.stack(
+            proj_mats), np.stack(intrinsics)
+        self.world2cams, self.cam2worlds = np.stack(
+            world2cams), np.stack(cam2worlds)
 
     # This function is borrowed from IDR: https://github.com/lioryariv/idr
     def load_K_Rt_from_P(self, filename, P=None):
@@ -162,19 +171,23 @@ class MVSDatasetDTU(Dataset):
         with open(filename) as f:
             lines = [line.rstrip() for line in f.readlines()]
         # extrinsics: line [1,5), 4x4 matrix
-        extrinsics = np.fromstring(' '.join(lines[1:5]), dtype=np.float32, sep=' ')
+        extrinsics = np.fromstring(
+            ' '.join(lines[1:5]), dtype=np.float32, sep=' ')
         extrinsics = extrinsics.reshape((4, 4))
         # intrinsics: line [7-10), 3x3 matrix
-        intrinsics = np.fromstring(' '.join(lines[7:10]), dtype=np.float32, sep=' ')
+        intrinsics = np.fromstring(
+            ' '.join(lines[7:10]), dtype=np.float32, sep=' ')
         intrinsics = intrinsics.reshape((3, 3))
         # depth_min & depth_interval: line 11
         depth_min = float(lines[11].split()[0]) * self.scale_factor
-        depth_max = depth_min + float(lines[11].split()[1]) * 192 * self.scale_factor
+        depth_max = depth_min + \
+            float(lines[11].split()[1]) * 192 * self.scale_factor
         self.depth_interval = float(lines[11].split()[1])
         return intrinsics, extrinsics, [depth_min, depth_max]
 
     def read_depth(self, filename):
-        depth_h = np.array(read_pfm(filename)[0], dtype=np.float32)  # (800, 800)
+        depth_h = np.array(read_pfm(filename)[
+                           0], dtype=np.float32)  # (800, 800)
         depth_h = cv2.resize(depth_h, None, fx=0.5, fy=0.5,
                              interpolation=cv2.INTER_NEAREST)  # (600, 800)
         depth_h = depth_h[44:556, 80:720]  # (512, 640)
@@ -197,16 +210,16 @@ class MVSDatasetDTU(Dataset):
     def __getitem__(self, idx):
         sample = {}
         scan, light_idx, target_view, src_views = self.metas[idx]
-        if self.split=='train':
+        if self.split == 'train':
             ids = torch.randperm(5)[:3]
             view_ids = [src_views[i] for i in ids] + [target_view]
         else:
             view_ids = [src_views[i] for i in range(3)] + [target_view]
 
-
         affine_mat, affine_mat_inv = [], []
         imgs, depths_h = [], []
-        proj_mats, intrinsics, w2cs, c2ws, near_fars = [], [], [], [], []  # record proj mats between views
+        proj_mats, intrinsics, w2cs, c2ws, near_fars = [], [
+        ], [], [], []  # record proj mats between views
         for i, vid in enumerate(view_ids):
 
             # NOTE that the id in image file names is from 1 to 49 (not 0~48)
@@ -216,7 +229,8 @@ class MVSDatasetDTU(Dataset):
                                           f'Depths/{scan}/depth_map_{vid:04d}.pfm')
 
             img = Image.open(img_filename)
-            img_wh = np.round(np.array(img.size) * self.downSample).astype('int')
+            img_wh = np.round(np.array(img.size) *
+                              self.downSample).astype('int')
             img = img.resize(img_wh, Image.BILINEAR)
             img = self.transform(img)
             imgs += [img]
@@ -251,9 +265,12 @@ class MVSDatasetDTU(Dataset):
 
         depths_h = np.stack(depths_h)
         proj_mats = np.stack(proj_mats)[:, :3]
-        affine_mat, affine_mat_inv = np.stack(affine_mat), np.stack(affine_mat_inv)
-        intrinsics, w2cs, c2ws, near_fars = np.stack(intrinsics), np.stack(w2cs), np.stack(c2ws), np.stack(near_fars)
-        view_ids_all = [target_view] + list(src_views) if type(src_views[0]) is not list else [j for sub in src_views for j in sub]
+        affine_mat, affine_mat_inv = np.stack(
+            affine_mat), np.stack(affine_mat_inv)
+        intrinsics, w2cs, c2ws, near_fars = np.stack(intrinsics), np.stack(
+            w2cs), np.stack(c2ws), np.stack(near_fars)
+        view_ids_all = [target_view] + list(src_views) if type(
+            src_views[0]) is not list else [j for sub in src_views for j in sub]
         c2ws_all = self.cam2worlds[self.remap[view_ids_all]]
 
         sample['images'] = imgs  # (V, H, W, 3)
@@ -271,5 +288,3 @@ class MVSDatasetDTU(Dataset):
         sample['c2ws_all'] = c2ws_all.astype(np.float32)
 
         return sample
-
-

@@ -207,8 +207,10 @@ def rendering(args, pose_ref, rays_pts, rays_ndc, depth_candidates, rays_o, rays
         # print(rays_dir.size())
         # print(rays_o.size())
             
-        if raw.shape[-1]>4:
-            input_feat = torch.cat((input_feat[...,:8],raw[...,4:]), dim=-1)
+        if raw_fg.shape[-1]>4:
+            input_feat = torch.cat((input_feat[...,:8],raw_fg[...,4:]), dim=-1)
+        if raw_bg.shape[-1]>4:
+            input_feat = torch.cat((input_feat[...,:8],raw_bg[...,4:]), dim=-1)
 
         dists = depth2dist(depth_candidates, cos_angle)
         # dists = ndc2dist(rays_ndc)

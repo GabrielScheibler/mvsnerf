@@ -127,7 +127,7 @@ class MVSSystem(LightningModule):
         rgb, disp, acc, depth_pred, alpha, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale,
                                                        volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)
 
-        print("outside_rendering: ", torch.var(rgb,dim=1).mean())
+        #print("outside_rendering: ", torch.var(rgb,dim=1).mean())
 
 
         if self.args.with_depth:
@@ -212,7 +212,11 @@ class MVSSystem(LightningModule):
                 # rendering
                 rgb, disp, acc, depth_pred, density_ray, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale,
                                                        volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)
-                print("outside_rendering: ", torch.var(rgb,dim=1).mean())
+                #print("outside_rendering: ", torch.var(rgb,dim=1).mean())
+                print_frustum(pose_ref,inv_scale,ref_idx=0)
+                in_sphere = torch.sum(rays_pts * rays_pts, dim=-1) <= 1
+                in_sphere_ones = torch.ones_like(in_sphere)
+                print(torch.sum(in_sphere) / torch.sum(in_sphere_ones))
                 rgbs.append(rgb.cpu());depth_preds.append(depth_pred.cpu())
 
             imgs = imgs.cpu()
