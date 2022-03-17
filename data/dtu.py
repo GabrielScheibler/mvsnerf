@@ -32,11 +32,11 @@ class MVSDatasetDTU(Dataset):
             'split must be either "train", "val" or "test"!'
         self.img_wh = img_wh
         self.downSample = downSample
-        self.scale_factor = 1.0 / 200
         self.scale_mat = np.array([[246.40544, 0.0, 0.0, -37.542286],
                                    [0.0, 246.40544, 0.0, -42.644344],
                                    [0.0, 0.0, 246.40544, 653.20886],
                                    [0.0, 0.0, 0.0, 1.0]])
+        self.scale_factor = 1.0 / self.scale_mat[0,0]
         self.max_len = max_len
         if img_wh is not None:
             assert img_wh[0] % 32 == 0 and img_wh[1] % 32 == 0, \
