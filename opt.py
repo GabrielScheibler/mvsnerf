@@ -24,7 +24,7 @@ def config_parser(cmd=None):
     parser.add_argument("--pts_dim", type=int, default=3)
     parser.add_argument("--dir_dim", type=int, default=3)
     parser.add_argument("--alpha_feat_dim", type=int, default=8)
-    parser.add_argument('--net_type', type=str, default='v0')
+    parser.add_argument('--net_type', type=str, default='v3')
     parser.add_argument('--dataset_name', type=str, default='blender',
                         choices=['dtu', 'blender', 'llff', 'dtu_ft'])
     parser.add_argument('--use_color_volume', default=False, action="store_true",
@@ -79,6 +79,12 @@ def config_parser(cmd=None):
                         help='log2 of max freq for positional encoding (2D direction)')
     parser.add_argument("--raw_noise_std", type=float, default=0.,
                         help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
+
+
+
+
+    parser.add_argument("--anneal_end", type=int, default=1000,
+                        help='epoch count when annealing is done')
 
 
 

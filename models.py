@@ -1,3 +1,4 @@
+from codecs import xmlcharrefreplace_errors
 import torch
 torch.autograd.set_detect_anomaly(True)
 import torch.nn as nn
@@ -174,7 +175,6 @@ class Renderer_ours(nn.Module):
         self.rgb_linear.apply(weights_init)
 
     def forward_alpha(self, x):
-
         dim = x.shape[-1]
         in_ch_feat = dim-self.in_ch_pts
         input_pts, input_feats = torch.split(x, [self.in_ch_pts, in_ch_feat], dim=-1)
@@ -638,11 +638,11 @@ class Renderer_Neus_Background(nn.Module):
 
         return outputs
 
-class Renderer_Neus_Foreground(nn.Module):
+class Renderer_Neus_Background_1(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, input_ch_feat=8, skips=[4], use_viewdirs=False):
         """
         """
-        super(Renderer_Neus_Foreground, self).__init__()
+        super(Renderer_Neus_Background_1, self).__init__()
         self.D = D
         self.W = W
         self.input_ch = input_ch
@@ -652,7 +652,7 @@ class Renderer_Neus_Foreground(nn.Module):
         self.in_ch_pts, self.in_ch_views, self.in_ch_feat = input_ch, input_ch_views, input_ch_feat
 
         self.pts_linears = nn.ModuleList(
-            [nn.Linear(input_ch, W, bias=True)] + [nn.Linear(W, W, bias=True) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
+            [nn.Linear(input_ch + input_ch_views + input_ch_feat, W, bias=True)] + [nn.Linear(W, W, bias=True) if i not in self.skips else nn.Linear(W + input_ch + input_ch_views + input_ch_feat, W) for i in range(D-1)])
         self.pts_bias = nn.Linear(input_ch_feat, W)
         self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)])
 
@@ -669,38 +669,22 @@ class Renderer_Neus_Foreground(nn.Module):
         self.alpha_linear.apply(weights_init)
         self.rgb_linear.apply(weights_init)
 
-    def forward_alpha(self,x):
-        dim = x.shape[-1]
-        input_pts, input_feats = torch.split(x, [self.in_ch_pts, self.in_ch_feat], dim=-1)
-
-        h = input_pts
-        bias = self.pts_bias(input_feats)
-        for i, l in enumerate(self.pts_linears):
-            h = self.pts_linears[i](h) + bias
-            h = F.relu(h)
-            if i in self.skips:
-                h = torch.cat([input_pts, h], -1)
-
-        alpha = self.alpha_linear(h)
-        print("using non-functional forward_alpha method")
-        return alpha
-
     def forward(self, x):
         dim = x.shape[-1]
         in_ch_feat = dim-self.in_ch_pts-self.in_ch_views
         input_pts, input_feats, input_views = torch.split(x, [self.in_ch_pts, in_ch_feat, self.in_ch_views], dim=-1)
 
-        h = input_pts
+        h = x
         bias = self.pts_bias(input_feats) #if in_ch_feat == self.in_ch_feat else  input_feats
         for i, l in enumerate(self.pts_linears):
             h = self.pts_linears[i](h) + bias
             h = F.relu(h)
             if i in self.skips:
-                h = torch.cat([input_pts, h], -1)
+                h = torch.cat([x, h], -1)
 
 
         if self.use_viewdirs:
-            alpha = torch.relu(self.alpha_linear(h))
+            alpha = F.relu(self.alpha_linear(h))
             feature = self.feature_linear(h)
             h = torch.cat([feature, input_views], -1)
 
@@ -714,6 +698,231 @@ class Renderer_Neus_Foreground(nn.Module):
             outputs = self.output_linear(h)
 
         return outputs
+
+class Renderer_Neus_Foreground(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, input_ch_feat=8, skips=[4], use_viewdirs=False):
+        """
+        """
+        super(Renderer_Neus_Foreground, self).__init__()
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.in_ch_pts, self.in_ch_views, self.in_ch_feat = input_ch, input_ch_views, input_ch_feat
+
+        self.d_sdf_feature = 128
+        self.d_normals = input_ch
+
+        self.sdf_network = SDFNetwork(input_ch, input_ch_views, input_ch_feat, self.d_sdf_feature+1)
+        self.rendering_network = RenderingNetwork(input_ch, self.d_normals, input_ch_views, input_ch_feat, self.d_sdf_feature)
+        self.deviation_network = SingleVarianceNetwork(0.3)
+        self.nerf = Renderer_Neus_Background_1(D, W, input_ch, input_ch_views, output_ch, input_ch_feat, skips, use_viewdirs=True)
+
+    def forward_alpha(self,x):
+        return None
+
+    def forward(self, x):
+        input_pts, input_feats, input_views = torch.split(x, [self.in_ch_pts, self.in_ch_feat, self.in_ch_views], dim=-1)
+
+        sdf_output = self.sdf_network.forward(x)
+        #sdf_output = self.nerf(x)
+        # rgb = sdf_output[...,1:4]
+        # alpha = sdf_output[...,0].unsqueeze(-1)
+
+
+        sdf_feature_vector = sdf_output[...,1:]
+        sdf_distance = sdf_output[...,:1]
+        sdf_gradients = self.sdf_network.gradient(x)
+        sdf_gradients_pts, sdf_gradients_feats, sdf_gradients_views = torch.split(sdf_gradients, [self.in_ch_pts, self.in_ch_feat, self.in_ch_views], dim=-1)
+
+        rendering_output = self.rendering_network.forward(input_pts, sdf_gradients_pts, input_views, input_feats, sdf_feature_vector)
+        rgb = rendering_output
+
+        inv_s = self.deviation_network(torch.zeros([1, 3]))[:, :1].clip(1e-6, 1e6)           # Single parameter
+        batch_size, n_samples, _ = x.shape
+        inv_s = inv_s.expand(batch_size, n_samples, 1)
+
+        return torch.cat([rgb, sdf_distance, sdf_gradients_pts[...,:3], inv_s], -1)
+
+        #return torch.cat([rgb,alpha],-1)
+
+
+class SingleVarianceNetwork(nn.Module):
+    def __init__(self, init_val):
+        super(SingleVarianceNetwork, self).__init__()
+        self.register_parameter('variance', nn.Parameter(torch.tensor(init_val)))
+
+    def forward(self, x):
+        return torch.ones([len(x), 1]).cuda() * torch.exp(self.variance * 10.0).cuda()
+
+#This implementation is borrowed from IDR: https://github.com/lioryariv/idr
+class SDFNetwork(nn.Module):
+    def __init__(self,
+                 d_in,
+                 d_in_view,
+                 d_in_feat,
+                 d_out,
+                 d_hidden=128,
+                 n_layers=8,
+                 skip_in=(4,),
+                 multires=0,
+                 bias=0.5,
+                 scale=1,
+                 geometric_init=True,
+                 weight_norm=True,
+                 inside_outside=False):
+        super(SDFNetwork, self).__init__()
+
+        self.d_in = d_in
+        self.d_in_view = d_in_view
+        self.d_in_feat = d_in_feat
+
+        dims = [d_in + d_in_feat] + [d_hidden for _ in range(n_layers)] + [d_out]
+
+        self.num_layers = len(dims)
+        self.skip_in = skip_in
+        self.scale = scale
+
+        for l in range(0, self.num_layers - 1):
+            if l + 1 in self.skip_in:
+                out_dim = dims[l + 1] - dims[0]
+            else:
+                out_dim = dims[l + 1]
+
+            lin = nn.Linear(dims[l], out_dim)
+
+            if geometric_init:
+                if l == self.num_layers - 2:
+                    if not inside_outside:
+                        torch.nn.init.normal_(lin.weight, mean=np.sqrt(np.pi) / np.sqrt(dims[l]), std=0.0001)
+                        torch.nn.init.constant_(lin.bias, -bias)
+                    else:
+                        torch.nn.init.normal_(lin.weight, mean=-np.sqrt(np.pi) / np.sqrt(dims[l]), std=0.0001)
+                        torch.nn.init.constant_(lin.bias, bias)
+                elif multires > 0 and l == 0:
+                    torch.nn.init.constant_(lin.bias, 0.0)
+                    torch.nn.init.constant_(lin.weight[:, 3:], 0.0)
+                    torch.nn.init.normal_(lin.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(out_dim))
+                elif multires > 0 and l in self.skip_in:
+                    torch.nn.init.constant_(lin.bias, 0.0)
+                    torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
+                    torch.nn.init.constant_(lin.weight[:, -(dims[0] - 3):], 0.0)
+                else:
+                    torch.nn.init.constant_(lin.bias, 0.0)
+                    torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
+
+            if weight_norm:
+                lin = nn.utils.weight_norm(lin)
+
+            setattr(self, "lin" + str(l), lin)
+
+        self.activation = nn.Softplus(beta=100)
+        self.pts_bias = nn.Linear(self.d_in_feat, d_hidden)
+        torch.nn.init.constant_(self.pts_bias.bias, 0.0)
+        torch.nn.init.constant_(self.pts_bias.weight, 0.0)
+
+
+    def forward(self, inputs):
+        inputs_all = inputs * self.scale
+        input_pts, input_feats, input_views = torch.split(inputs, [self.d_in, self.d_in_feat, self.d_in_view], dim=-1)
+        inputs = torch.cat([input_pts, input_feats], -1)
+
+        x = torch.cat([input_pts, input_feats], -1)
+        bias = self.pts_bias(input_feats)
+        for l in range(0, self.num_layers - 1):
+            lin = getattr(self, "lin" + str(l))
+
+            if l in self.skip_in:
+                x = torch.cat([x, inputs], -1) / np.sqrt(2)
+
+            if(l > 0):
+                x = x + bias
+
+            x = lin(x)
+
+            if l < self.num_layers - 2:
+                x = self.activation(x)
+        return torch.cat([x[..., :1] / self.scale, x[..., 1:]], dim=-1)
+
+    def sdf(self, x):
+        return self.forward(x)[:, :1]
+
+    def sdf_hidden_appearance(self, x):
+        return self.forward(x)
+
+    def gradient(self, x):
+        with torch.set_grad_enabled(True):
+            x.requires_grad_(True)
+            y = self.sdf(x)
+        d_output = torch.ones_like(y, requires_grad=False, device=y.device)
+        gradients = torch.autograd.grad(
+            outputs=y,
+            inputs=x,
+            grad_outputs=d_output,
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True)[0]
+        return gradients
+
+# This implementation is borrowed from IDR: https://github.com/lioryariv/idr
+class RenderingNetwork(nn.Module):
+    def __init__(self,
+                 d_in,
+                 d_in_normals,
+                 d_in_views,
+                 d_in_mvs_feat,
+                 d_in_sdf_feat,
+                 d_out=3,
+                 d_hidden=128,
+                 n_layers=8,
+                 weight_norm=True,
+                 multires_norms=0,
+                 squeeze_out=True):
+        super().__init__()
+
+        self.squeeze_out = squeeze_out
+        dims = [d_in + d_in_normals + d_in_views + d_in_mvs_feat + d_in_sdf_feat] + [d_hidden for _ in range(n_layers)] + [d_out]
+
+        self.embednorms_fn = None
+        if multires_norms > 0:
+            embednorms_fn, input_ch = get_embedder(multires_norms)
+            self.embednorms_fn = embednorms_fn
+            dims[0] += (input_ch - 3)
+
+        self.num_layers = len(dims)
+
+        for l in range(0, self.num_layers - 1):
+            out_dim = dims[l + 1]
+            lin = nn.Linear(dims[l], out_dim)
+
+            if weight_norm:
+                lin = nn.utils.weight_norm(lin)
+
+            setattr(self, "lin" + str(l), lin)
+
+        self.relu = nn.ReLU()
+        self.pts_bias = nn.Linear(d_in_mvs_feat + d_in_sdf_feat + d_in_normals + d_in_views, d_hidden)
+
+    def forward(self, points, normals, view_dirs, mvs_feature_vector, sdf_feature_vector):
+        if self.embednorms_fn is not None:
+            normals = self.embednorms_fn(normals)
+
+        rendering_input = torch.cat([points, view_dirs, normals, mvs_feature_vector, sdf_feature_vector], dim=-1)
+
+        x = rendering_input
+        bias = self.pts_bias(torch.cat([view_dirs, normals, mvs_feature_vector, sdf_feature_vector], dim=-1))
+        for l in range(0, self.num_layers - 1):
+            lin = getattr(self, "lin" + str(l))
+
+            if(l > 0):
+                x = x + bias
+
+            x = lin(x)
+
+            if l < self.num_layers - 2:
+                x = self.relu(x)
+
+        if self.squeeze_out:
+            x = torch.sigmoid(x)
+        return x
 
 class MVSNeRF(nn.Module):
     def __init__(self, D=8, W=256, input_ch_pts=3, input_ch_views=3, input_ch_feat=8, skips=[4], net_type='v2'):

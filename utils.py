@@ -150,7 +150,6 @@ def inverse_get_ndc_coordinate(c2w_ref, intrinsic_ref, point_samples_pixel, inv_
     '''
         point_samples [N_rays N_sample 3]
     '''
-    #TODO make differentiable
 
     N_rays, N_samples = point_samples_pixel.shape[:2]
     point_samples_pixel = point_samples_pixel.reshape(-1, 3)

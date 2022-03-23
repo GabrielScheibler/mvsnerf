@@ -124,7 +124,7 @@ class MVSSystem(LightningModule):
             build_rays(imgs, depths_h, pose_ref, w2cs, c2ws, intrinsics, near_fars, N_rays, N_samples, pad=args.pad)
 
 
-        rgb, disp, acc, depth_pred, alpha, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale,
+        rgb, disp, acc, depth_pred, alpha, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
                                                        volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)
 
         #print("outside_rendering: ", torch.var(rgb,dim=1).mean())
@@ -210,7 +210,7 @@ class MVSSystem(LightningModule):
 
 
                 # rendering
-                rgb, disp, acc, depth_pred, density_ray, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale,
+                rgb, disp, acc, depth_pred, density_ray, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
                                                        volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)
                 #print("outside_rendering: ", torch.var(rgb,dim=1).mean())
                 print_frustum(pose_ref,inv_scale,ref_idx=0)
@@ -298,6 +298,12 @@ class MVSSystem(LightningModule):
             ckpt['network_fine_state_dict'] = self.render_kwargs_train['network_fine'].state_dict()
         torch.save(ckpt, path)
         print('Saved checkpoints at', path)
+
+    def get_cos_anneal_ratio(self):
+        if self.args.anneal_end == 0.0:
+            return 1.0
+        else:
+            return np.min([1.0, self.global_step / self.args.anneal_end])
 
 if __name__ == '__main__':
     torch.set_default_dtype(torch.float32)

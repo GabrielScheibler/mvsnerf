@@ -19,11 +19,29 @@ def raw2alpha(sigma, dist, net_type):
 
     alpha_softmax = F.softmax(sigma, 1)
 
-    alpha = 1. - torch.exp(-sigma)
+    alpha = 1. - torch.exp(-sigma) 
 
     T = torch.cumprod(torch.cat([torch.ones(alpha.shape[0], 1).to(alpha.device), 1. - alpha + 1e-10], -1), -1)[:, :-1]
     weights = alpha * T  # [N_rays, N_samples]
     return alpha, weights, alpha_softmax
+
+def raw2alpha_neus(sigma_fg, sigma_bg, dist, net_type, inside_sphere):
+
+    sigma_fg =  sigma_fg * inside_sphere
+    sigma_bg = sigma_bg * (1.0 - inside_sphere)
+    sigma = sigma_fg + sigma_bg
+
+    alpha_softmax = F.softmax(sigma, 1)
+
+    alpha = 1. - torch.exp(-sigma)
+
+    T = torch.cumprod(torch.cat([torch.ones(alpha.shape[0], 1).to(alpha.device), 1. - alpha + 1e-10], -1), -1)[:, :-1]
+
+    weights = alpha * T  # [N_rays, N_samples]
+    weights_fg = weights * inside_sphere
+    weights_bg = weights * (1.0 - inside_sphere)
+
+    return alpha, weights, alpha_softmax, weights_fg, weights_bg
 
 def batchify(fn, chunk):
     """Constructs a version of 'fn' that applies to smaller batches.
@@ -104,16 +122,19 @@ def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, white_bkgd=Fa
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
-    #TODO combine tow outputs in here
     device = z_vals.device
 
+    #raw_bg[..., 3] = 0
+
+    alpha, weights, alpha_softmax, weights_fg, weights_bg = raw2alpha_neus(raw_fg[..., 3], raw_bg[..., 3], dists, net_type, inside_sphere)
+
     rgb_fg = raw_fg[..., :3] # [N_rays, N_samples, 3]
-    alpha_fg, weights_fg, alpha_softmax_fg = raw2alpha(raw_fg[..., 3], dists, net_type)  # [N_rays, N_samples]
-    weights_fg = weights_fg * inside_sphere
+    #alpha_fg, weights_fg, alpha_softmax_fg = raw2alpha(raw_fg[..., 3], dists, net_type)  # [N_rays, N_samples]
+    #weights_fg = weights_fg * inside_sphere
 
     rgb_bg = raw_bg[..., :3] # [N_rays, N_samples, 3]
-    alpha_bg, weights_bg, alpha_softmax_bg = raw2alpha(raw_bg[..., 3], dists, net_type)  # [N_rays, N_samples]
-    weights_bg = weights_bg * (1-inside_sphere)
+    #alpha_bg, weights_bg, alpha_softmax_bg = raw2alpha(raw_bg[..., 3], dists, net_type)  # [N_rays, N_samples]
+    #weights_bg = weights_bg * (1-inside_sphere)
 
     rgb_map = torch.sum(weights_fg[..., None] * rgb_fg, -2) + torch.sum(weights_bg[..., None] * rgb_bg, -2) # [N_rays, 3]
     depth_map = torch.sum(weights_fg * z_vals, -1) + torch.sum(weights_bg * z_vals, -1)
@@ -123,9 +144,43 @@ def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, white_bkgd=Fa
 
     if white_bkgd:
         rgb_map = rgb_map + (1. - acc_map[..., None])
-    return rgb_map, disp_map, acc_map, weights_fg + weights_bg, depth_map, alpha_fg + alpha_bg
+    return rgb_map, disp_map, acc_map, weights, depth_map, alpha
 
+def transform_raw_neus(raw, pts, dirs, cos_anneal_ratio):
+    # Section length
+        batch_size, n_samples, _ = raw.shape
 
+        dists = pts[:,1:,:] - pts[:,:-1,:]
+        dists = torch.sum(dists * dists, dim=-1).cuda()
+        sample_dist = torch.mean(dists, dim=[0,1]).cuda()
+        dists = torch.cat([dists, torch.Tensor([sample_dist]).expand(dists[..., :1].shape).cuda()], -1).unsqueeze(-1)
+
+        sampled_color, sdf, gradients, inv_s = torch.split(raw, [3, 1, 3, 1], dim=-1)
+
+        dirs = dirs.unsqueeze(1)
+
+        true_cos = (dirs * gradients).sum(-1, keepdim=True)
+
+        # "cos_anneal_ratio" grows from 0 to 1 in the beginning training iterations. The anneal strategy below makes
+        # the cos value "not dead" at the beginning training iterations, for better convergence.
+        iter_cos = -(F.relu(-true_cos * 0.5 + 0.5) * (1.0 - cos_anneal_ratio) +
+                     F.relu(-true_cos) * cos_anneal_ratio)  # always non-positive
+
+        # Estimate signed distances at section points
+        estimated_next_sdf = sdf + iter_cos * dists * 0.5
+        estimated_prev_sdf = sdf - iter_cos * dists * 0.5
+
+        prev_cdf = torch.sigmoid(estimated_prev_sdf * inv_s)
+        next_cdf = torch.sigmoid(estimated_next_sdf * inv_s)
+
+        p = prev_cdf - next_cdf
+        c = prev_cdf
+
+        alpha = ((p + 1e-5) / (c + 1e-5)).clip(0.0, 1.0)
+
+        sigma = - torch.log(1-alpha).reshape(batch_size, n_samples, 1)
+
+        return torch.cat([sampled_color, sigma], -1)
 
 def gen_angle_feature(c2ws, rays_pts, rays_dir):
     """
@@ -169,7 +224,7 @@ def gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_ndc, feat_dim, 
         input_feat = index_point_feature(volume_feature, rays_ndc) if torch.is_tensor(volume_feature) else volume_feature(rays_ndc)
     return input_feat
 
-def rendering(args, pose_ref, rays_pts, rays_ndc, depth_candidates, rays_o, rays_dir, inv_scale,
+def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, rays_dir, inv_scale, cos_anneal_ratio,
               volume_feature=None, imgs=None, network_fn=None, img_feat=None, network_query_fn=None, white_bkgd=False, **kwargs):
 
     batch_size, n_samples, _ = rays_pts.size()
@@ -185,7 +240,7 @@ def rendering(args, pose_ref, rays_pts, rays_ndc, depth_candidates, rays_o, rays
         angle = rays_dir/cos_angle.unsqueeze(-1)
 
     # rays_pts
-    input_feat = gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_ndc, args.feat_dim, \
+    input_feat = gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_pts_ndc, args.feat_dim, \
                                img_feat, args.img_downscale, args.use_color_volume, args.net_type)
 
     # rays_dir_n = rays_dir/cos_angle.unsqueeze(-1)
@@ -198,10 +253,11 @@ def rendering(args, pose_ref, rays_pts, rays_ndc, depth_candidates, rays_o, rays
     if args.net_type is 'v3':
         #TODO Neus rendering here
         pts_norm = torch.linalg.norm(rays_pts, ord=2, dim=-1, keepdim=True)
-        inside_sphere = (pts_norm < 1.0).float().detach()
-        relax_inside_sphere = (pts_norm < 1.2).float().detach()
-        raw_fg = network_query_fn(rays_ndc, angle, input_feat, network_fn.forward_fg)
-        raw_bg = network_query_fn(rays_ndc, angle, input_feat, network_fn.forward_bg)
+        inside_sphere = (pts_norm < 1.0).float().detach().squeeze()
+        relax_inside_sphere = (pts_norm < 1.2).float().detach().squeeze()
+        raw_fg_alpha = network_query_fn(rays_pts_ndc, angle, input_feat, network_fn.forward_fg)
+        raw_bg = network_query_fn(rays_pts_ndc, angle, input_feat, network_fn.forward_bg)
+        raw_fg = transform_raw_neus(raw_fg_alpha, rays_pts_ndc, angle, cos_anneal_ratio)
         # print(rays_pts.size())
         # print(rays_ndc.size())
         # print(rays_dir.size())
