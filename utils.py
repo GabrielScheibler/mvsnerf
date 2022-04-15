@@ -803,6 +803,44 @@ def inverse_rotate_unitsphere(pose_ref, point_samples, ref_idx=0):
 
     return point_samples
 
+def rotate_unitsphere_2D(pose_ref, point_samples, ref_idx=0):
+    '''
+        point_samples [N_rays N_sample 3]
+    '''
+
+    c2w_ref = pose_ref['c2ws'][ref_idx]
+
+    N_rays, N_samples = point_samples.shape[:2]
+    point_samples = point_samples.reshape(-1, 3)
+
+    camera_pos = c2w_ref[:3,3]
+    ay = math.atan2(camera_pos[0],camera_pos[2])
+
+    point_samples = rotate_2d(1, point_samples, ay)
+    
+    point_samples = point_samples.view(N_rays, N_samples, 3)
+
+    return point_samples
+
+def inverse_rotate_unitsphere_2D(pose_ref, point_samples, ref_idx=0):
+    '''
+        point_samples [N_rays N_sample 3]
+    '''
+
+    c2w_ref = pose_ref['c2ws'][ref_idx]
+
+    N_rays, N_samples = point_samples.shape[:2]
+    point_samples = point_samples.reshape(-1, 3)
+
+    camera_pos = c2w_ref[:3,3]
+    ay = math.atan2(camera_pos[0],camera_pos[2])
+
+    point_samples = rotate_2d(1, point_samples, -ay)
+    
+    point_samples = point_samples.view(N_rays, N_samples, 3)
+
+    return point_samples
+
 def rotate_2d(axis, points, angle):
     """
     Rotate a point counterclockwise by a given angle around a given origin.
@@ -810,7 +848,7 @@ def rotate_2d(axis, points, angle):
     The angle should be given in radians.
     """
     sina = math.sin(angle)
-    cosa= math.cos(angle)
+    cosa = math.cos(angle)
 
     R = torch.eye(3).cuda()
     if axis == 0:
@@ -825,11 +863,12 @@ def rotate_2d(axis, points, angle):
     return points
 
 def world_to_sdf_input_space(pose_ref, point_samples, inv_scale=None):
-    ref_idx = 0
+    ref_idx = -1
     pad = 24
     # points = points_w2c_unitspshere(pose_ref, point_samples, inv_scale, ref_idx)
     # points = get_ndc_coordinate(pose_ref['w2cs'][ref_idx], pose_ref['intrinsics'][ref_idx], point_samples, inv_scale, near=pose_ref['near_fars'][ref_idx][0], far=pose_ref['near_fars'][ref_idx][1], pad=pad)
-    points = rotate_unitsphere(pose_ref, point_samples, ref_idx)
+    # points = rotate_unitsphere(pose_ref, point_samples, ref_idx)
+    points = rotate_unitsphere_2D(pose_ref, point_samples, ref_idx)
     # points = point_samples
     return points
 
@@ -848,11 +887,12 @@ def world_to_sdf_input_space_dirs(pose_ref, point_samples, inv_scale=None):
     return dirs
 
 def sdf_input_space_to_world(pose_ref, point_samples, inv_scale=None):
-    ref_idx = 0
+    ref_idx = -1
     pad = 24
     # points = points_c2w_unitspshere(pose_ref, point_samples, inv_scale, ref_idx)
     # points = inverse_get_ndc_coordinate(pose_ref['c2ws'][ref_idx], pose_ref['intrinsics'][ref_idx], point_samples, inv_scale, near=pose_ref['near_fars'][ref_idx][0], far=pose_ref['near_fars'][ref_idx][1], pad=pad)
-    points = inverse_rotate_unitsphere(pose_ref, point_samples, ref_idx)
+    # points = inverse_rotate_unitsphere(pose_ref, point_samples, ref_idx)
+    points = inverse_rotate_unitsphere_2D(pose_ref, point_samples, ref_idx)
     # points = point_samples
     return points
 
@@ -891,3 +931,226 @@ def print_frustum(pose_ref, inv_scale, ref_idx=0):
 
     print(frustum_corners_world)
     return
+
+def gen_pts_feats_no_ndc(imgs, volume_feature, rays_pts, pose_ref, feat_dim, img_feat=None, img_downscale=1.0, use_color_volume=False, net_type='v0', ref_idx=0):
+
+    rays_ndc = get_ndc_points(pose_ref, rays_pts, imgs, ref_idx=ref_idx)
+
+    N_rays, N_samples = rays_pts.shape[:2]
+    if img_feat is not None:
+        feat_dim += img_feat.shape[1]*img_feat.shape[2]
+
+    if not use_color_volume:
+        input_feat = torch.empty((N_rays, N_samples, feat_dim), device=imgs.device, dtype=torch.float)
+        ray_feats = index_point_feature(volume_feature, rays_ndc) if torch.is_tensor(volume_feature) else volume_feature(rays_ndc)
+        input_feat[..., :8] = ray_feats
+        input_feat[..., 8:] = build_color_volume(rays_pts, pose_ref, imgs, img_feat, with_mask=True, downscale=img_downscale)
+    else:
+        input_feat = index_point_feature(volume_feature, rays_ndc) if torch.is_tensor(volume_feature) else volume_feature(rays_ndc)
+
+    return input_feat
+
+def get_ndc_points(pose_ref, rays_pts, imgs, ref_idx=0):
+    N, V, C, H, W = imgs.shape
+
+    w2c_ref, intrinsic_ref = pose_ref['w2cs'][ref_idx], pose_ref['intrinsics'][ref_idx]  # assume camera 0 is reference
+    inv_scale = torch.tensor([W-1, H-1]).cuda()
+
+    ray_coordinate_ref = []
+    near_ref, far_ref = pose_ref['near_fars'][ref_idx, 0], pose_ref['near_fars'][ref_idx, 1]
+
+    points_ndc = get_ndc_coordinate(w2c_ref, intrinsic_ref, rays_pts, inv_scale, near=near_ref, far=far_ref, pad=0) #ndc = normalized device coordinates
+
+    return points_ndc
+
+def near_far_from_sphere(rays_o, rays_d):
+    a = torch.sum(rays_d**2, dim=-1, keepdim=True)
+    b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
+    mid = 0.5 * (-b) / a
+    near = mid - 1.0
+    far = mid + 1.0
+    return near, far
+
+def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, args, perturb, sdf_network, network_query_fn, n_samples=64, n_outside=32, n_importance=64, up_sample_steps=4):
+    batch_size, _ = rays_o.shape
+    N, V, C, H, W = imgs.shape
+    inv_scale = torch.tensor([W-1, H-1]).cuda()
+    near, far = near_far_from_sphere(rays_o, rays_d)
+    #sample_dist = 2.0 / n_samples   # Assuming the region of interest is a unit sphere
+    z_vals = torch.linspace(0.0, 1.0, n_samples).cuda()
+    z_vals = near.cuda() + (far.cuda() - near.cuda()) * z_vals[None, :].cuda()
+
+    z_vals_outside = None
+    if n_outside > 0:
+        z_vals_outside = torch.linspace(1e-3, 1.0 - 1.0 / (n_outside + 1.0), n_outside)
+
+    if perturb > 0:
+        t_rand = (torch.rand([batch_size, 1]) - 0.5).cuda()
+        z_vals = z_vals + t_rand * 2.0 / n_samples
+
+        if n_outside > 0:
+            mids = .5 * (z_vals_outside[..., 1:] + z_vals_outside[..., :-1])
+            upper = torch.cat([mids, z_vals_outside[..., -1:]], -1)
+            lower = torch.cat([z_vals_outside[..., :1], mids], -1)
+            t_rand = torch.rand([batch_size, z_vals_outside.shape[-1]])
+            z_vals_outside = lower[None, :] + (upper - lower)[None, :] * t_rand
+
+    if n_outside > 0:
+        z_vals_outside = far / torch.flip(z_vals_outside, dims=[-1]).cuda() + 1.0 / n_samples
+
+    background_alpha = None
+    background_sampled_color = None
+
+    # Up sample
+    if n_importance > 0:
+        with torch.no_grad():
+            pts_world = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]
+            pts = world_to_sdf_input_space(pose_ref, pts_world, inv_scale)
+
+            input_feat = gen_pts_feats_no_ndc(imgs, volume_feature, pts_world,
+                                                    pose_ref,
+                                                    args.feat_dim,
+                                                    img_feat=None,
+                                                    img_downscale=args.img_downscale,
+                                                    use_color_volume=args.use_color_volume,
+                                                    net_type=args.net_type,
+                                                    ref_idx=0)
+
+            # sdf = sdf_network.sdf(pts.reshape(-1, 3),input_feat.reshape(-1,input_feat.size()[-1])).reshape(batch_size, n_samples)
+            sdf = network_query_fn(pts, pts, input_feat, sdf_network.sdf).squeeze()
+
+            for i in range(up_sample_steps):
+                new_z_vals = up_sample(rays_o,
+                                            rays_d,
+                                            z_vals,
+                                            sdf,
+                                            n_importance // up_sample_steps,
+                                            64 * 2**i,
+                                            pts)
+
+                new_pts_world = rays_o[:, None, :] + rays_d[:, None, :] * new_z_vals[..., :, None]
+                new_pts = world_to_sdf_input_space(pose_ref, new_pts_world, inv_scale)
+
+                input_feat = gen_pts_feats_no_ndc(imgs, volume_feature, new_pts_world,
+                                                    pose_ref,
+                                                    args.feat_dim,
+                                                    img_feat=None,
+                                                    img_downscale=args.img_downscale,
+                                                    use_color_volume=args.use_color_volume,
+                                                    net_type=args.net_type,
+                                                    ref_idx=0)
+
+                z_vals, sdf = cat_z_vals(sdf_network,
+                                         rays_o,
+                                         rays_d,
+                                         z_vals,
+                                         new_z_vals,
+                                         sdf,
+                                         network_query_fn,
+                                         input_feat,
+                                         new_pts,
+                                         last=(i + 1 == up_sample_steps))
+
+                pts_world = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]
+                pts = world_to_sdf_input_space(pose_ref, pts_world, inv_scale)
+                pts_ndc = get_ndc_points(pose_ref, pts_world, imgs, ref_idx=0)
+
+    return pts_world, z_vals, pts_ndc
+
+def up_sample(rays_o, rays_d, z_vals, sdf, n_importance, inv_s, pts):
+    """
+    Up sampling give a fixed inv_s
+    """
+    batch_size, n_samples = z_vals.shape
+    pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]  # n_rays, n_samples, 3
+
+    radius = torch.linalg.norm(pts, ord=2, dim=-1, keepdim=False)
+    inside_sphere = (radius[:, :-1] < 1.42) | (radius[:, 1:] < 1.42)
+    sdf = sdf.reshape(batch_size, n_samples)
+    prev_sdf, next_sdf = sdf[:, :-1], sdf[:, 1:]
+    prev_z_vals, next_z_vals = z_vals[:, :-1], z_vals[:, 1:]
+    mid_sdf = (prev_sdf + next_sdf) * 0.5
+    cos_val = (next_sdf - prev_sdf) / (next_z_vals - prev_z_vals + 1e-5)
+
+    # ----------------------------------------------------------------------------------------------------------
+    # Use min value of [ cos, prev_cos ]
+    # Though it makes the sampling (not rendering) a little bit biased, this strategy can make the sampling more
+    # robust when meeting situations like below:
+    #
+    # SDF
+    # ^
+    # |\          -----x----...
+    # | \        /
+    # |  x      x
+    # |---\----/-------------> 0 level
+    # |    \  /
+    # |     \/
+    # |
+    # ----------------------------------------------------------------------------------------------------------
+    prev_cos_val = torch.cat([torch.zeros([batch_size, 1]).cuda(), cos_val[:, :-1]], dim=-1)
+    cos_val = torch.stack([prev_cos_val, cos_val], dim=-1)
+    cos_val, _ = torch.min(cos_val, dim=-1, keepdim=False)
+    cos_val = cos_val.clip(-1e3, 0.0) * inside_sphere
+
+    dist = (next_z_vals - prev_z_vals)
+    prev_esti_sdf = mid_sdf - cos_val * dist * 0.5
+    next_esti_sdf = mid_sdf + cos_val * dist * 0.5
+    prev_cdf = torch.sigmoid(prev_esti_sdf * inv_s)
+    next_cdf = torch.sigmoid(next_esti_sdf * inv_s)
+    alpha = (prev_cdf - next_cdf + 1e-5) / (prev_cdf + 1e-5)
+    weights = alpha * torch.cumprod(
+        torch.cat([torch.ones([batch_size, 1]).cuda(), 1. - alpha + 1e-7], -1), -1)[:, :-1]
+
+    z_samples = sample_pdf(z_vals, weights, n_importance, det=True).detach()
+    return z_samples
+
+def cat_z_vals(sdf_network, rays_o, rays_d, z_vals, new_z_vals, sdf, network_query_fn, input_feat, new_pts, last=False):
+    batch_size, n_samples = z_vals.shape
+    _, n_importance = new_z_vals.shape
+    pts_world = rays_o[:, None, :] + rays_d[:, None, :] * new_z_vals[..., :, None]
+    z_vals = torch.cat([z_vals, new_z_vals], dim=-1)
+    z_vals, index = torch.sort(z_vals, dim=-1)
+
+    pts = new_pts
+
+    if not last:
+        # new_sdf = sdf_network.sdf(pts.reshape(-1, 3),input_feat.reshape(-1,input_feat.size()[-1])).reshape(batch_size, n_importance)
+        new_sdf = network_query_fn(pts, pts, input_feat, sdf_network.sdf).squeeze()
+        sdf = torch.cat([sdf, new_sdf], dim=-1)
+        xx = torch.arange(batch_size)[:, None].expand(batch_size, n_samples + n_importance).reshape(-1).cuda()
+        index = index.reshape(-1)
+        sdf = sdf[(xx, index)].reshape(batch_size, n_samples + n_importance)
+
+    return z_vals, sdf
+
+def sample_pdf(bins, weights, n_samples, det=False):
+    # This implementation is from NeRF
+    # Get pdf
+    weights = weights + 1e-5  # prevent nans
+    pdf = weights / torch.sum(weights, -1, keepdim=True)
+    cdf = torch.cumsum(pdf, -1)
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)
+    # Take uniform samples
+    if det:
+        u = torch.linspace(0. + 0.5 / n_samples, 1. - 0.5 / n_samples, steps=n_samples).cuda()
+        u = u.expand(list(cdf.shape[:-1]) + [n_samples])
+    else:
+        u = torch.rand(list(cdf.shape[:-1]) + [n_samples])
+
+    # Invert CDF
+    u = u.contiguous()
+    inds = torch.searchsorted(cdf, u, right=True)
+    below = torch.max(torch.zeros_like(inds - 1).cuda(), inds - 1)
+    above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds).cuda(), inds)
+    inds_g = torch.stack([below, above], -1)  # (batch, N_samples, 2)
+
+    matched_shape = [inds_g.shape[0], inds_g.shape[1], cdf.shape[-1]]
+    cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
+    bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
+
+    denom = (cdf_g[..., 1] - cdf_g[..., 0])
+    denom = torch.where(denom < 1e-5, torch.ones_like(denom).cuda(), denom)
+    t = (u - cdf_g[..., 0]) / denom
+    samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
+
+    return samples

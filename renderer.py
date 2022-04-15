@@ -1,3 +1,6 @@
+from cmath import e
+
+from numpy import ones_like
 import torch
 import torch.nn.functional as F
 from utils import normal_vect, index_point_feature, build_color_volume, world_to_sdf_input_space, world_to_sdf_input_space_dirs
@@ -124,17 +127,12 @@ def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, white_bkgd=Fa
     """
     device = z_vals.device
 
-    #raw_bg[..., 3] = 0
+    #raw_bg[..., :] = 0
 
     alpha, weights, alpha_softmax, weights_fg, weights_bg = raw2alpha_neus(raw_fg[..., 3], raw_bg[..., 3], dists, net_type, inside_sphere)
 
     rgb_fg = raw_fg[..., :3] # [N_rays, N_samples, 3]
-    #alpha_fg, weights_fg, alpha_softmax_fg = raw2alpha(raw_fg[..., 3], dists, net_type)  # [N_rays, N_samples]
-    #weights_fg = weights_fg * inside_sphere
-
     rgb_bg = raw_bg[..., :3] # [N_rays, N_samples, 3]
-    #alpha_bg, weights_bg, alpha_softmax_bg = raw2alpha(raw_bg[..., 3], dists, net_type)  # [N_rays, N_samples]
-    #weights_bg = weights_bg * (1-inside_sphere)
 
     rgb_map = torch.sum(weights_fg[..., None] * rgb_fg, -2) + torch.sum(weights_bg[..., None] * rgb_bg, -2) # [N_rays, 3]
     depth_map = torch.sum(weights_fg * z_vals, -1) + torch.sum(weights_bg * z_vals, -1)
@@ -151,8 +149,8 @@ def transform_raw_neus(raw, pts, dirs, cos_anneal_ratio):
         batch_size, n_samples, _ = raw.shape
 
         dists = pts[:,1:,:] - pts[:,:-1,:]
-        dists = torch.sum(dists * dists, dim=-1).cuda()
-        sample_dist = torch.mean(dists, dim=[0,1]).cuda()
+        dists = torch.linalg.norm(dists, ord=2, dim=-1)
+        sample_dist = torch.mean(dists).cuda()
         dists = torch.cat([dists, torch.Tensor([sample_dist]).expand(dists[..., :1].shape).cuda()], -1).unsqueeze(-1)
 
         sampled_color, sdf, gradients, inv_s = torch.split(raw, [3, 1, 3, 1], dim=-1)
@@ -176,11 +174,11 @@ def transform_raw_neus(raw, pts, dirs, cos_anneal_ratio):
         p = prev_cdf - next_cdf
         c = prev_cdf
 
-        alpha = ((p + 1e-5) / (c + 1e-5)).clip(0.0, 1.0)
+        alpha = ((p + 1e-5) / (c + 1e-5)).clip(0.0 + 1e-07, 1.0 - 1e-07)
 
         sigma = - torch.log(1-alpha).reshape(batch_size, n_samples, 1)
 
-        return torch.cat([sampled_color, sigma], -1)
+        return torch.cat([sampled_color, sigma], -1), gradients
 
 def gen_angle_feature(c2ws, rays_pts, rays_dir):
     """
@@ -250,32 +248,39 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
     # dirs = world_to_sdf_input_space_dirs(pose_ref, rays_dir_n, inv_scale)
 
     # rays_ndc = rays_ndc * 2 - 1.0
-    if args.net_type is 'v3':
-        #TODO Neus rendering here
-        pts_norm = torch.linalg.norm(rays_pts, ord=2, dim=-1, keepdim=True)
-        inside_sphere = (pts_norm < 1.0).float().detach().squeeze()
-        relax_inside_sphere = (pts_norm < 1.2).float().detach().squeeze()
-        raw_fg_alpha = network_query_fn(rays_pts_ndc, angle, input_feat, network_fn.forward_fg)
+    if args.net_type is 'neus':
+        H, W = imgs.shape[-2:]
+        H, W = int(H), int(W)
+        inv_scale = torch.tensor([W-1, H-1]).cuda()
+        
+        input_pts = world_to_sdf_input_space(pose_ref, rays_pts, inv_scale)
+        input_dir = world_to_sdf_input_space_dirs(pose_ref, rays_dir[:,None,:], inv_scale).squeeze(1)
+
+        pts_norm = torch.linalg.norm(rays_pts, ord=2, dim=-1)
+        inside_sphere = (pts_norm < 1.0).float().detach()
+
         raw_bg = network_query_fn(rays_pts_ndc, angle, input_feat, network_fn.forward_bg)
-        raw_fg = transform_raw_neus(raw_fg_alpha, rays_pts_ndc, angle, cos_anneal_ratio)
-        # print(rays_pts.size())
-        # print(rays_ndc.size())
-        # print(rays_dir.size())
-        # print(rays_o.size())
-            
-        if raw_fg.shape[-1]>4:
-            input_feat = torch.cat((input_feat[...,:8],raw_fg[...,4:]), dim=-1)
-        if raw_bg.shape[-1]>4:
-            input_feat = torch.cat((input_feat[...,:8],raw_bg[...,4:]), dim=-1)
+        raw_fg_alpha = network_query_fn(input_pts, input_dir, input_feat, network_fn.forward_fg)
+        raw_fg, sdf_gradients = transform_raw_neus(raw_fg_alpha, input_pts, input_dir, cos_anneal_ratio)
+
+        # assert torch.isnan(raw_fg.view(-1)).sum().item()==0
+        # assert torch.isnan(raw_bg.view(-1)).sum().item()==0
+        # print(raw_fg[...,3].min())
+        # print(raw_fg[...,3].max())
+        # print(raw_bg[...,3].min())
+        # print(raw_bg[...,3].max())
+        # print('\n')
 
         dists = depth2dist(depth_candidates, cos_angle)
         # dists = ndc2dist(rays_ndc)
         rgb_map, disp_map, acc_map, weights, depth_map, alpha = raw2outputs_neus(raw_fg, raw_bg, depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
+        rgb_fg, _, _, _, _, _ = raw2outputs_neus(raw_fg, torch.zeros_like(raw_bg), depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
+        rgb_bg, _, _, _, _, _ = raw2outputs_neus(torch.zeros_like(raw_fg), raw_bg, depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
         ret = {}
-        return rgb_map, input_feat, weights, depth_map, alpha, ret
+        return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_fg, rgb_bg, sdf_gradients
 
 
-    raw = network_query_fn(rays_ndc, angle, input_feat, network_fn)
+    raw = network_query_fn(rays_pts_ndc, angle, input_feat, network_fn)
     if raw.shape[-1]>4:
         input_feat = torch.cat((input_feat[...,:8],raw[...,4:]), dim=-1)
 
@@ -284,7 +289,7 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
     rgb_map, disp_map, acc_map, weights, depth_map, alpha = raw2outputs(raw, depth_candidates, dists, white_bkgd,args.net_type)
     ret = {}
 
-    return rgb_map, input_feat, weights, depth_map, alpha, ret
+    return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_map, rgb_map, torch.ones_like(rays_pts).cuda()
 
 def render_density(network_fn, rays_pts, density_feature,  network_query_fn, chunk=1024 * 5):
     densities = []

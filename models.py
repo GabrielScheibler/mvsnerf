@@ -561,11 +561,16 @@ class Renderer_Neus(nn.Module):
         outputs = self.nerf_bg(x)
         return outputs
 
+    def sdf(self, x):
+        outputs = self.nerf_fg.sdf(x)
+        return outputs
+
 class Renderer_Neus_Background(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, input_ch_feat=8, skips=[4], use_viewdirs=False):
         """
         """
         super(Renderer_Neus_Background, self).__init__()
+        W = 128
         self.D = D
         self.W = W
         self.input_ch = input_ch
@@ -638,67 +643,6 @@ class Renderer_Neus_Background(nn.Module):
 
         return outputs
 
-class Renderer_Neus_Background_1(nn.Module):
-    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, input_ch_feat=8, skips=[4], use_viewdirs=False):
-        """
-        """
-        super(Renderer_Neus_Background_1, self).__init__()
-        self.D = D
-        self.W = W
-        self.input_ch = input_ch
-        self.input_ch_views = input_ch_views
-        self.skips = skips
-        self.use_viewdirs = use_viewdirs
-        self.in_ch_pts, self.in_ch_views, self.in_ch_feat = input_ch, input_ch_views, input_ch_feat
-
-        self.pts_linears = nn.ModuleList(
-            [nn.Linear(input_ch + input_ch_views + input_ch_feat, W, bias=True)] + [nn.Linear(W, W, bias=True) if i not in self.skips else nn.Linear(W + input_ch + input_ch_views + input_ch_feat, W) for i in range(D-1)])
-        self.pts_bias = nn.Linear(input_ch_feat, W)
-        self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)])
-
-        if use_viewdirs:
-            self.feature_linear = nn.Linear(W, W)
-            self.alpha_linear = nn.Linear(W, 1)
-            self.rgb_linear = nn.Linear(W//2, 3)
-        else:
-            self.output_linear = nn.Linear(W, output_ch)
-
-        self.pts_linears.apply(weights_init)
-        self.views_linears.apply(weights_init)
-        self.feature_linear.apply(weights_init)
-        self.alpha_linear.apply(weights_init)
-        self.rgb_linear.apply(weights_init)
-
-    def forward(self, x):
-        dim = x.shape[-1]
-        in_ch_feat = dim-self.in_ch_pts-self.in_ch_views
-        input_pts, input_feats, input_views = torch.split(x, [self.in_ch_pts, in_ch_feat, self.in_ch_views], dim=-1)
-
-        h = x
-        bias = self.pts_bias(input_feats) #if in_ch_feat == self.in_ch_feat else  input_feats
-        for i, l in enumerate(self.pts_linears):
-            h = self.pts_linears[i](h) + bias
-            h = F.relu(h)
-            if i in self.skips:
-                h = torch.cat([x, h], -1)
-
-
-        if self.use_viewdirs:
-            alpha = F.relu(self.alpha_linear(h))
-            feature = self.feature_linear(h)
-            h = torch.cat([feature, input_views], -1)
-
-            for i, l in enumerate(self.views_linears):
-                h = self.views_linears[i](h)
-                h = F.relu(h)
-
-            rgb = torch.sigmoid(self.rgb_linear(h))
-            outputs = torch.cat([rgb, alpha], -1)
-        else:
-            outputs = self.output_linear(h)
-
-        return outputs
-
 class Renderer_Neus_Foreground(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, input_ch_feat=8, skips=[4], use_viewdirs=False):
         """
@@ -714,7 +658,6 @@ class Renderer_Neus_Foreground(nn.Module):
         self.sdf_network = SDFNetwork(input_ch, input_ch_views, input_ch_feat, self.d_sdf_feature+1)
         self.rendering_network = RenderingNetwork(input_ch, self.d_normals, input_ch_views, input_ch_feat, self.d_sdf_feature)
         self.deviation_network = SingleVarianceNetwork(0.3)
-        self.nerf = Renderer_Neus_Background_1(D, W, input_ch, input_ch_views, output_ch, input_ch_feat, skips, use_viewdirs=True)
 
     def forward_alpha(self,x):
         return None
@@ -723,10 +666,6 @@ class Renderer_Neus_Foreground(nn.Module):
         input_pts, input_feats, input_views = torch.split(x, [self.in_ch_pts, self.in_ch_feat, self.in_ch_views], dim=-1)
 
         sdf_output = self.sdf_network.forward(x)
-        #sdf_output = self.nerf(x)
-        # rgb = sdf_output[...,1:4]
-        # alpha = sdf_output[...,0].unsqueeze(-1)
-
 
         sdf_feature_vector = sdf_output[...,1:]
         sdf_distance = sdf_output[...,:1]
@@ -741,8 +680,11 @@ class Renderer_Neus_Foreground(nn.Module):
         inv_s = inv_s.expand(batch_size, n_samples, 1)
 
         return torch.cat([rgb, sdf_distance, sdf_gradients_pts[...,:3], inv_s], -1)
-
-        #return torch.cat([rgb,alpha],-1)
+    
+    def sdf(self,x):
+        sdf_output = self.sdf_network.forward(x)
+        sdf_distance = sdf_output[...,:1]
+        return sdf_distance
 
 
 class SingleVarianceNetwork(nn.Module):
@@ -761,7 +703,7 @@ class SDFNetwork(nn.Module):
                  d_in_feat,
                  d_out,
                  d_hidden=128,
-                 n_layers=8,
+                 n_layers=10,
                  skip_in=(4,),
                  multires=0,
                  bias=0.5,
@@ -797,11 +739,11 @@ class SDFNetwork(nn.Module):
                     else:
                         torch.nn.init.normal_(lin.weight, mean=-np.sqrt(np.pi) / np.sqrt(dims[l]), std=0.0001)
                         torch.nn.init.constant_(lin.bias, bias)
-                elif multires > 0 and l == 0:
+                elif l == 0:
                     torch.nn.init.constant_(lin.bias, 0.0)
                     torch.nn.init.constant_(lin.weight[:, 3:], 0.0)
                     torch.nn.init.normal_(lin.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(out_dim))
-                elif multires > 0 and l in self.skip_in:
+                elif l in self.skip_in:
                     torch.nn.init.constant_(lin.bias, 0.0)
                     torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
                     torch.nn.init.constant_(lin.weight[:, -(dims[0] - 3):], 0.0)
@@ -872,7 +814,7 @@ class RenderingNetwork(nn.Module):
                  d_in_sdf_feat,
                  d_out=3,
                  d_hidden=128,
-                 n_layers=8,
+                 n_layers=10,
                  weight_norm=True,
                  multires_norms=0,
                  squeeze_out=True):
@@ -945,7 +887,7 @@ class MVSNeRF(nn.Module):
             self.nerf = Renderer_linear(D=D, W=W,input_ch_feat=input_ch_feat,
                      input_ch=input_ch_pts, output_ch=4, skips=skips,
                      input_ch_views=input_ch_views, use_viewdirs=True)
-        elif 'v3' == net_type:
+        elif 'neus' == net_type:
             self.nerf = Renderer_Neus(D=D, W=W,input_ch_feat=input_ch_feat,
                      input_ch=input_ch_pts, output_ch=4, skips=skips,
                      input_ch_views=input_ch_views, use_viewdirs=True)
@@ -964,6 +906,10 @@ class MVSNeRF(nn.Module):
     def forward_bg(self, x):
         RGBA = self.nerf.forward_bg(x)
         return RGBA
+
+    def sdf(self, x):
+        sdf = self.nerf.sdf(x)
+        return sdf
 
 def create_nerf_mvs(args, pts_embedder=True, use_mvs=False, dir_embedder=True):
     """Instantiate mvs NeRF's MLP model.
@@ -1044,6 +990,7 @@ def create_nerf_mvs(args, pts_embedder=True, use_mvs=False, dir_embedder=True):
         'use_viewdirs': args.use_viewdirs,
         'white_bkgd': args.white_bkgd,
         'raw_noise_std': args.raw_noise_std,
+        'pts_embedder': embed_fn
     }
 
 

@@ -123,8 +123,14 @@ class MVSSystem(LightningModule):
         rays_pts, rays_dir, target_s, rays_NDC, depth_candidates, rays_o, rays_depth, ndc_parameters = \
             build_rays(imgs, depths_h, pose_ref, w2cs, c2ws, intrinsics, near_fars, N_rays, N_samples, pad=args.pad)
 
+        rays_o = rays_o.permute(1,0)
 
-        rgb, disp, acc, depth_pred, alpha, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
+        if(self.args.net_type=="neus" and args.neus_sampling):
+            rays_pts, depth_candidates, rays_NDC = gen_pts_neus(
+                rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
+
+
+        rgb, disp, acc, depth_pred, alpha, ret, _, _, sdf_gradients = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
                                                        volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)
 
         #print("outside_rendering: ", torch.var(rgb,dim=1).mean())
@@ -148,6 +154,12 @@ class MVSSystem(LightningModule):
         ##################  rendering #####################
         img_loss = img2mse(rgb, target_s)
         loss = loss + img_loss
+
+        if(self.args.net_type=="neus" and args.use_eikonal):
+            eikonal_loss = torch.mean(torch.sum(sdf_gradients * sdf_gradients, -1))
+            self.log('train/eikonal_loss', eikonal_loss.item(), prog_bar=True)
+            loss += eikonal_loss
+
         if 'rgb0' in ret:
             img_loss_coarse = img2mse(ret['rgb0'], target_s)
             psnr = mse2psnr2(img_loss_coarse.item())
@@ -201,26 +213,33 @@ class MVSSystem(LightningModule):
             tgt_to_world, intrinsic = pose_ref['c2ws'][-1], pose_ref['intrinsics'][-1]
             volume_feature, img_feat, _ = self.MVSNet(imgs[:, :3], proj_mats[:, :3], near_fars[0], pad=args.pad)
             imgs = self.unpreprocess(imgs)
-            rgbs, depth_preds = [],[]
+            rgbs, depth_preds, rgbs_fg, rgbs_bg = [],[],[],[]
             for chunk_idx in range(H*W//args.chunk + int(H*W%args.chunk>0)):
 
 
                 rays_pts, rays_dir, rays_NDC, depth_candidates, rays_o, ndc_parameters = \
                     build_rays_test(H, W, tgt_to_world, world_to_ref, intrinsic, near_fars, near_fars[-1], args.N_samples, pad=args.pad, chunk=args.chunk, idx=chunk_idx)
 
+                if(self.args.net_type=="neus" and args.neus_sampling):
+                    rays_pts, depth_candidates, rays_NDC = gen_pts_neus(rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
+
 
                 # rendering
-                rgb, disp, acc, depth_pred, density_ray, ret = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
-                                                       volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)
+                rgb, disp, acc, depth_pred, density_ray, ret, rgb_fg, rgb_bg, sdf_gradients = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
+                                                       volume_feature, imgs[:, :-1], img_feat=None, **self.render_kwargs_train)
                 #print("outside_rendering: ", torch.var(rgb,dim=1).mean())
-                print_frustum(pose_ref,inv_scale,ref_idx=0)
+                # print_frustum(pose_ref,inv_scale,ref_idx=0)
                 in_sphere = torch.sum(rays_pts * rays_pts, dim=-1) <= 1
                 in_sphere_ones = torch.ones_like(in_sphere)
-                print(torch.sum(in_sphere) / torch.sum(in_sphere_ones))
+                # print(torch.sum(in_sphere) / torch.sum(in_sphere_ones))
                 rgbs.append(rgb.cpu());depth_preds.append(depth_pred.cpu())
+                rgbs_fg.append(rgb_fg.cpu())
+                rgbs_bg.append(rgb_bg.cpu())
 
             imgs = imgs.cpu()
             rgb, depth_r = torch.clamp(torch.cat(rgbs).reshape(H, W, 3).permute(2,0,1),0,1), torch.cat(depth_preds).reshape(H, W)
+            rgb_fg = torch.clamp(torch.cat(rgbs_fg).reshape(H, W, 3).permute(2,0,1),0,1)
+            rgb_bg = torch.clamp(torch.cat(rgbs_bg).reshape(H, W, 3).permute(2,0,1),0,1)
             img_err_abs = (rgb - imgs[0,-1]).abs()
 
             if self.args.with_depth:
@@ -253,7 +272,7 @@ class MVSSystem(LightningModule):
                 self.logger.experiment.add_images('val/depth_gt_pred_err', depth_pred_r_[None], self.global_step)
 
             imgs = imgs[0]
-            img_vis = torch.cat((imgs, torch.stack((rgb, img_err_abs.cpu()*5))), dim=0) # N 3 H W
+            img_vis = torch.cat((imgs, torch.stack((rgb, rgb_fg, rgb_bg, img_err_abs.cpu()*5))), dim=0) # N 3 H W
             self.logger.experiment.add_images('val/rgb_pred_err', img_vis, self.global_step)
 
             os.makedirs(f'runs_new/{self.args.expname}/{self.args.expname}/',exist_ok=True)
@@ -333,7 +352,8 @@ if __name__ == '__main__':
                       check_val_every_n_epoch = max(system.args.num_epochs//system.args.N_vis,1),
                       benchmark=True,
                       precision=16 if args.use_amp else 32,
-                      amp_level='O1')
+                      amp_level='O1',
+                      gradient_clip_val=0.5)
 
     trainer.fit(system)
     system.save_ckpt()

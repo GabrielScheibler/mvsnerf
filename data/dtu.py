@@ -8,6 +8,8 @@ from PIL import Image
 import torch
 from torchvision import transforms as T
 import torchvision.transforms.functional as F
+import math
+import random
 
 
 def colorjitter(img, factor):
@@ -204,6 +206,23 @@ class MVSDatasetDTU(Dataset):
         for i, item in enumerate(self.id_list):
             self.remap[item] = i
 
+    def get_random_rotation_matrix(self, axis=1):
+
+        angle = random.uniform(-math.pi, math.pi)
+
+        sina = math.sin(angle)
+        cosa = math.cos(angle)
+
+        R = np.eye(4)
+        if axis == 0:
+            R[1,1],R[1,2],R[2,1],R[2,2] = cosa,sina,-sina,cosa
+        elif axis == 1:
+            R[0,0],R[0,2],R[2,0],R[2,2] = cosa,sina,-sina,cosa
+        else:
+            R[0,0],R[0,1],R[1,0],R[1,1] = cosa,sina,-sina,cosa
+
+        return R
+
     def __len__(self):
         return len(self.metas) if self.max_len <= 0 else self.max_len
 
@@ -213,8 +232,10 @@ class MVSDatasetDTU(Dataset):
         if self.split == 'train':
             ids = torch.randperm(5)[:3]
             view_ids = [src_views[i] for i in ids] + [target_view]
+            random_rot = np.eye(4)
         else:
             view_ids = [src_views[i] for i in range(3)] + [target_view]
+            random_rot = self.get_random_rotation_matrix(axis=1)
 
         affine_mat, affine_mat_inv = [], []
         imgs, depths_h = [], []
@@ -240,6 +261,8 @@ class MVSDatasetDTU(Dataset):
             intrinsics.append(self.intrinsics[index_mat])
             w2cs.append(self.world2cams[index_mat])
             c2ws.append(self.cam2worlds[index_mat])
+            # w2cs.append(self.world2cams[index_mat] @ random_rot)
+            # c2ws.append(np.linalg.inv(self.world2cams[index_mat] @ random_rot))
 
             affine_mat.append(proj_mat_ls)
             affine_mat_inv.append(np.linalg.inv(proj_mat_ls))
