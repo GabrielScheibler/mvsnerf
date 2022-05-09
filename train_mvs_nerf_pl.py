@@ -155,7 +155,7 @@ class MVSSystem(LightningModule):
         img_loss = img2mse(rgb, target_s)
         loss = loss + img_loss
 
-        if(self.args.net_type=="neus" and args.use_eikonal):
+        if(self.args.net_type=="neus" and not args.no_eikonal):
             eikonal_loss = torch.mean(torch.sum(sdf_gradients * sdf_gradients, -1))
             self.log('train/eikonal_loss', eikonal_loss.item(), prog_bar=True)
             loss += eikonal_loss

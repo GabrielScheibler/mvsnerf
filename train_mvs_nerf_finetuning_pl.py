@@ -160,9 +160,18 @@ class MVSSystem(LightningModule):
             xyz_NDC = get_ndc_coordinate(w2c_ref, intrinsic_ref, xyz_coarse_sampled, inv_scale,
                                          near=self.near_far_source[0], far=self.near_far_source[1], pad=args.pad, lindisp=args.use_disp)
 
+        rays_o = rays_o.permute(1,0)
+        if(self.args.net_type=="neus" and args.neus_sampling):
+            xyz_coarse_sampled, z_vals, xyz_NDC = gen_pts_neus(
+                rays_o, rays_d, self.imgs, self.volume, self.pose_source, args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
+
+
+        rgbs, disp, acc, depth_pred, alpha, extras, _, _, sdf_gradients = rendering(args, self.pose_source, xyz_coarse_sampled, xyz_NDC, z_vals, rays_o, rays_d, inv_scale, self.get_cos_anneal_ratio(),
+                                                       self.volume, self.imgs, img_feat=None,  **self.render_kwargs_train)
+
         # rendering
-        rgbs, disp, acc, depth_pred, alpha, extras = rendering(args, self.pose_source, xyz_coarse_sampled, xyz_NDC, z_vals, rays_o, rays_d,
-                                                       self.volume, self.imgs,  **self.render_kwargs_train)
+        # rgbs, disp, acc, depth_pred, alpha, extras = rendering(args, self.pose_source, xyz_coarse_sampled, xyz_NDC, z_vals, rays_o, rays_d,
+        #                                                self.volume, self.imgs,  **self.render_kwargs_train)
 
         log, loss = {}, 0
         if 'rgb0' in extras:
@@ -177,6 +186,11 @@ class MVSSystem(LightningModule):
             img_loss = img2mse(rgbs, rgbs_target)
             loss += img_loss
             psnr = mse2psnr2(img_loss.item())
+
+            if(self.args.net_type=="neus" and not args.no_eikonal):
+                eikonal_loss = torch.mean(torch.sum(sdf_gradients * sdf_gradients, -1))
+                self.log('train/eikonal_loss', eikonal_loss.item(), prog_bar=True)
+                loss += eikonal_loss
 
             with torch.no_grad():
                 self.log('train/loss', loss, prog_bar=True)
@@ -203,7 +217,7 @@ class MVSSystem(LightningModule):
         log = init_log({}, keys)
         with torch.no_grad():
 
-            rgbs, depth_preds = [],[]
+            rgbs, depth_preds, rgbs_fg, rgbs_bg = [],[],[],[]
             for chunk_idx in range(N_rays_all//args.chunk + int(N_rays_all%args.chunk>0)):
 
                 xyz_coarse_sampled, rays_o, rays_d, z_vals = ray_marcher(rays[chunk_idx*args.chunk:(chunk_idx+1)*args.chunk],
@@ -224,32 +238,53 @@ class MVSSystem(LightningModule):
                     xyz_NDC = get_ndc_coordinate(w2c_ref, intrinsic_ref, xyz_coarse_sampled, inv_scale,
                                     near=self.near_far_source[0], far=self.near_far_source[1],pad=args.pad, lindisp=args.use_disp)
 
+                rays_o = rays_o.permute(1,0)
+                if(self.args.net_type=="neus" and args.neus_sampling):
+                    xyz_coarse_sampled, z_vals, xyz_NDC = gen_pts_neus(
+                        rays_o, rays_d, self.imgs, self.volume, self.pose_source, args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
+
+
+                rgb, disp, acc, depth_pred, alpha, extras, rgb_fg, rgb_bg, sdf_gradients = rendering(args, self.pose_source, xyz_coarse_sampled, xyz_NDC, z_vals, rays_o, rays_d, inv_scale, self.get_cos_anneal_ratio(),
+                                                            self.volume, self.imgs, img_feat=None,  **self.render_kwargs_train)
 
                 # rendering
-                rgb, disp, acc, depth_pred, alpha, extras = rendering(args, self.pose_source, xyz_coarse_sampled,
-                                                                       xyz_NDC, z_vals, rays_o, rays_d,
-                                                                       self.volume, self.imgs,
-                                                                       **self.render_kwargs_train)
+                # rgb, disp, acc, depth_pred, alpha, extras = rendering(args, self.pose_source, xyz_coarse_sampled,
+                #                                                        xyz_NDC, z_vals, rays_o, rays_d,
+                #                                                        self.volume, self.imgs,
+                #                                                        **self.render_kwargs_train)
 
                 rgbs.append(rgb.cpu());depth_preds.append(depth_pred.cpu())
+                rgbs_fg.append(rgb_fg.cpu())
+                rgbs_bg.append(rgb_bg.cpu())
 
 
             rgbs, depth_r = torch.clamp(torch.cat(rgbs).reshape(H, W, 3),0,1), torch.cat(depth_preds).reshape(H, W)
+            rgbs_fg = torch.clamp(torch.cat(rgbs_fg).reshape(H, W, 3),0,1)
+            rgbs_bg = torch.clamp(torch.cat(rgbs_bg).reshape(H, W, 3),0,1)
             img_err_abs = (rgbs - img).abs()
 
             log['val_psnr_all'] = mse2psnr(torch.mean(img_err_abs ** 2))
             depth_r, _ = visualize_depth(depth_r, self.near_far_source)
             self.logger.experiment.add_images('val/depth_gt_pred', depth_r[None], self.global_step)
 
-            img_vis = torch.stack((img, rgbs, img_err_abs.cpu()*5)).permute(0,3,1,2)
+            imgss = self.imgs.permute((0,1,3,4,2))
+
+            img_vis = torch.stack((*imgss[0], img, rgbs, rgbs_fg, rgbs_bg, img_err_abs.cpu()*5)).permute(0,3,1,2)
             self.logger.experiment.add_images('val/rgb_pred_err', img_vis, self.global_step)
             os.makedirs(f'runs_fine_tuning/{self.args.expname}/{self.args.expname}/',exist_ok=True)
 
-            img_vis = torch.cat((img,rgbs,img_err_abs*10,depth_r.permute(1,2,0)),dim=1).numpy()
+            img_vis = torch.cat((*imgss[0], img, rgbs, rgbs_fg, rgbs_bg, img_err_abs*10, depth_r.permute(1,2,0)),dim=1).numpy()
             imageio.imwrite(f'runs_fine_tuning/{self.args.expname}/{self.args.expname}/{self.global_step:08d}_{self.idx:02d}.png', (img_vis*255).astype('uint8'))
             self.idx += 1
 
         return log
+
+    def get_cos_anneal_ratio(self):
+        return 1.0
+        if self.args.anneal_end == 0.0:
+            return 1.0
+        else:
+            return np.min([1.0, self.global_step / self.args.anneal_end])
 
     def validation_epoch_end(self, outputs):
 

@@ -25,13 +25,19 @@ class DTU_ft(Dataset):
         self.downsample = downsample
         print(f'==> image down scale: {self.downsample}')
 
-        self.scale_factor = 1.0 / 200
+        self.scale_mat = np.array([[246.40544, 0.0, 0.0, -37.542286],
+                                   [0.0, 246.40544, 0.0, -42.644344],
+                                   [0.0, 0.0, 246.40544, 653.20886],
+                                   [0.0, 0.0, 0.0, 1.0]])
+        self.scale_factor = 1.0 / self.scale_mat[0,0]
+
+        # self.scale_factor = 1.0 / 200
         self.define_transforms()
 
         self.pair_idx = torch.load('configs/pairs.th')
         self.pair_idx = [self.pair_idx['dtu_train'],self.pair_idx['dtu_test']]
         self.bbox_3d = torch.tensor([[-1.0, -1.0, 2.2], [1.0, 1.0, 4.2]])
-        self.near_far = [2.125, 4.525]
+        #self.near_far = [2.125, 4.525]
 
         if not load_ref:
             self.read_meta()
@@ -54,10 +60,23 @@ class DTU_ft(Dataset):
         self.depth_interval = float(lines[11].split()[1])
 
         # scaling
-        extrinsics[:3, 3] *= self.scale_factor
-        intrinsics[0:2] *= self.downsample
+        # extrinsics[:3, 3] *= self.scale_factor
+        # intrinsics[0:2] *= self.downsample
 
-        return intrinsics, extrinsics, [depth_min, depth_max]
+        #rotate translation vector from scale matrix to camera space
+        t = extrinsics[:3,:3] @ self.scale_mat[:3,-1]
+        #add translation vector to extrinsic matrix translation
+        extrinsics[:3,-1] += t
+        #scale the new extrinsic matrix translation vector by the scaling factor
+        extrinsics[:3, 3] /= self.scale_mat[0,0]
+        
+        intrinsics[:2] = intrinsics[:2] * self.downsample
+
+        near_far = np.array([depth_min, depth_max])
+        near_far = near_far / self.scale_factor
+        near_far = near_far / self.scale_mat[0][0]
+
+        return intrinsics, extrinsics, near_far
 
     def read_depth(self, filename):
         depth_h = np.array(read_pfm(filename)[0], dtype=np.float32)  # (800, 800)

@@ -24,7 +24,8 @@ def config_parser(cmd=None):
     parser.add_argument("--pts_dim", type=int, default=3)
     parser.add_argument("--dir_dim", type=int, default=3)
     parser.add_argument("--alpha_feat_dim", type=int, default=8)
-    parser.add_argument('--net_type', type=str, default='neus')
+    parser.add_argument('--net_type', type=str, default='neus',
+                        choices=['v0', 'v1', 'v2', 'neus'])
     parser.add_argument('--dataset_name', type=str, default='blender',
                         choices=['dtu', 'blender', 'llff', 'dtu_ft'])
     parser.add_argument('--use_color_volume', default=False, action="store_true",
@@ -87,8 +88,8 @@ def config_parser(cmd=None):
                         help='epoch count when annealing is done')
     parser.add_argument("--neus_sampling", default=False, action='store_true',
                         help='use neus sampling method')
-    parser.add_argument("--use_eikonal", default=False, action='store_true',
-                        help='use eikonal loss function')
+    parser.add_argument("--no_eikonal", default=False, action='store_true',
+                        help='do not use eikonal loss function')
 
 
 

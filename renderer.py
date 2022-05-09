@@ -248,7 +248,7 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
     # dirs = world_to_sdf_input_space_dirs(pose_ref, rays_dir_n, inv_scale)
 
     # rays_ndc = rays_ndc * 2 - 1.0
-    if args.net_type is 'neus':
+    if args.net_type == 'neus':
         H, W = imgs.shape[-2:]
         H, W = int(H), int(W)
         inv_scale = torch.tensor([W-1, H-1]).cuda()
