@@ -291,6 +291,30 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
 
     return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_map, rgb_map, torch.ones_like(rays_pts).cuda()
 
+def mesh_rendering(args, pose_ref, rays_pts, rays_pts_ndc, inv_scale,
+              volume_feature=None, imgs=None, network_fn=None, img_feat=None, network_query_fn=None, white_bkgd=False, **kwargs):
+
+    # rays_pts
+    input_feat = gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_pts_ndc, args.feat_dim, \
+                            img_feat, args.img_downscale, args.use_color_volume, args.net_type)
+
+    # rays_ndc = rays_ndc * 2 - 1.0
+
+    H, W = imgs.shape[-2:]
+    H, W = int(H), int(W)
+    inv_scale = torch.tensor([W-1, H-1]).cuda()
+    
+    input_pts = world_to_sdf_input_space(pose_ref, rays_pts, inv_scale)
+    input_dir = input_pts # dirs are not used for sdf and their values do not matter
+
+    if args.net_type == 'neus':
+        sdf = network_query_fn(input_pts, input_dir, input_feat, network_fn.sdf)
+        return sdf
+    else:
+        raw = network_query_fn(rays_pts_ndc, input_dir, input_feat, network_fn)
+        alpha, _, _ = raw2alpha(raw[...,3], None, None)
+        return alpha
+
 def render_density(network_fn, rays_pts, density_feature,  network_query_fn, chunk=1024 * 5):
     densities = []
     device = density_feature.device

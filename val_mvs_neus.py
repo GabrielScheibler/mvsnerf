@@ -135,6 +135,59 @@ for i_scene, scene in enumerate([1,8,21,103,114]):#,8,21,103,114
             imgs_source, proj_mats, near_far_source, pose_source = dataset_train.read_source_views(pair_idx=pair_idx,device=device)
             volume_feature, _, _ = MVSNet(imgs_source, proj_mats, near_far_source, pad=pad)
             imgs_source = unpreprocess(imgs_source)
+
+            # create 3D mesh
+            sdf_all = []
+            near = -1
+            far = 1
+            resolution = 100
+            if args.net_type == 'neus':
+                threshold = 0.5
+            else:
+                threshold = 0.5
+            use_alpha = True
+            pts, rays_o, rays_d, z_vals = point_grid([near,near,near],[far,far,far],resolution)
+            pts, rays_o, rays_d, z_vals = pts.to(device), rays_o.to(device), rays_d.to(device), z_vals.to(device)
+            xyz_coarse_sampled = pts
+
+            # Converting world coordinate to ndc coordinate
+            H, W = img.shape[:2]
+            inv_scale = torch.tensor([W - 1, H - 1]).to(device)
+            w2c_ref, intrinsic_ref = pose_source['w2cs'][0], pose_source['intrinsics'][0].clone()
+            xyz_NDC = get_ndc_coordinate(w2c_ref, intrinsic_ref, xyz_coarse_sampled, inv_scale,
+                                            near=near_far_source[0], far=near_far_source[1], pad=pad*args.imgScale_test)
+
+            # rendering
+            sdf = mesh_rendering(args, pose_source, xyz_coarse_sampled,
+                                    xyz_NDC, inv_scale,
+                                    volume_feature, imgs_source, **render_kwargs_train)
+
+            cos_anneal_ratio = 1.0
+
+            if use_alpha:
+                # rendering
+                rgb, disp, acc, depth_pred, alpha, extras, _, _, _ = rendering(args, pose_source, xyz_coarse_sampled,
+                                                                        xyz_NDC, z_vals, rays_o, rays_d, inv_scale, cos_anneal_ratio,
+                                                                        volume_feature,imgs_source, **render_kwargs_train)
+
+                sdf = alpha
+
+
+            
+            # pts_norm = torch.linalg.norm(pts, ord=2, dim=-1)
+            # outside_sphere = (pts_norm > 1.0).bool()
+
+            # outside_frame, _ = torch.max(xyz_NDC,dim=-1)
+            # outside_frame = outside_frame > 1
+
+            # sdf[outside_frame] = 1.0
+
+            sdf = sdf.reshape([resolution,resolution,resolution])
+            sdf = sdf.cpu().detach().numpy()
+            validate_mesh(save_dir, sdf, i_scene*1000 + i, world_space=False,
+                          resolution=resolution, threshold=threshold)
+            #3D mesh done
+
         
             N_rays_all = rays.shape[0]
             rgb_rays, depth_rays_preds = [],[]
@@ -142,6 +195,7 @@ for i_scene, scene in enumerate([1,8,21,103,114]):#,8,21,103,114
 
                 xyz_coarse_sampled, rays_o, rays_d, z_vals = ray_marcher(rays[chunk_idx*args.chunk:(chunk_idx+1)*args.chunk],
                                                     N_samples=args.N_samples)
+
 
                 # Converting world coordinate to ndc coordinate
                 H, W = img.shape[:2]

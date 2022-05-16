@@ -268,6 +268,7 @@ class MVSSystem(LightningModule):
             self.logger.experiment.add_images('val/depth_gt_pred', depth_r[None], self.global_step)
 
             imgss = self.imgs.permute((0,1,3,4,2))
+            imgss = imgss.cpu()
 
             img_vis = torch.stack((*imgss[0], img, rgbs, rgbs_fg, rgbs_bg, img_err_abs.cpu()*5)).permute(0,3,1,2)
             self.logger.experiment.add_images('val/rgb_pred_err', img_vis, self.global_step)

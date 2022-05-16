@@ -1154,3 +1154,52 @@ def sample_pdf(bins, weights, n_samples, det=False):
     samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
 
     return samples
+
+import trimesh
+import mcubes
+
+def validate_mesh(base_dir_path, sdf, iter_step, world_space=False, resolution=100, threshold=0.0):
+    bound_min = torch.tensor([-1,-1,-1], dtype=torch.float32)
+    bound_max = torch.tensor([1,1,1], dtype=torch.float32)
+
+    vertices, triangles =\
+        extract_geometry(bound_min, bound_max, resolution=resolution, threshold=threshold, sdf=sdf)
+    os.makedirs(os.path.join(base_dir_path, 'meshes'), exist_ok=True)
+
+    # if world_space:
+    #     vertices = vertices * self.dataset.scale_mats_np[0][0, 0] + self.dataset.scale_mats_np[0][:3, 3][None]
+
+    mesh = trimesh.Trimesh(vertices, triangles)
+    mesh.export(os.path.join(base_dir_path, 'meshes', '{:0>8d}.ply'.format(iter_step)))
+
+    print('End 3d mesh creation')
+
+def extract_geometry(bound_min, bound_max, resolution, threshold, sdf):
+    print('threshold: {}'.format(threshold))
+    u = sdf
+    vertices, triangles = mcubes.marching_cubes(u, threshold)
+    b_max_np = bound_max.detach().cpu().numpy()
+    b_min_np = bound_min.detach().cpu().numpy()
+
+    vertices = vertices / (resolution - 1.0) * (b_max_np - b_min_np)[None, :] + b_min_np[None, :]
+    return vertices, triangles
+
+def point_grid(bound_min, bound_max, resolution):
+
+    X = torch.linspace(bound_min[0], bound_max[0], resolution)
+    Y = torch.linspace(bound_min[1], bound_max[1], resolution)
+    Z = torch.linspace(bound_min[2], bound_max[2], resolution)
+
+    gridpoints = torch.cartesian_prod(X,Y,Z)
+
+    gridpoints = gridpoints.reshape([resolution*resolution,resolution,3])
+    rays_o = torch.clone(gridpoints[:,0,:]).squeeze()
+    rays_o[:,2] = 0
+    rays_d = torch.clone(gridpoints[:,0,:]).squeeze()
+    rays_d[:,0:2] = 0
+    rays_d[:,2] = 1
+
+    z_vals = torch.clone(gridpoints[:,:,2]).squeeze()
+
+
+    return gridpoints, rays_o, rays_d, z_vals
