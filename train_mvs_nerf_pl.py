@@ -37,6 +37,7 @@ class MVSSystem(LightningModule):
         self.args = args
         self.args.feat_dim = 8+3*4
         self.idx = 0
+        self.ema = None
 
         self.loss = SL1Loss()
         self.learning_rate = args.lrate
@@ -125,9 +126,9 @@ class MVSSystem(LightningModule):
 
         rays_o = rays_o.permute(1,0)
 
-        if(self.args.net_type=="neus" and args.neus_sampling):
+        if('neus' in self.args.net_type and args.neus_sampling):
             rays_pts, depth_candidates, rays_NDC = gen_pts_neus(
-                rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
+                rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, near_fars.squeeze()[-1], args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
 
 
         rgb, disp, acc, depth_pred, alpha, ret, _, _, sdf_gradients = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
@@ -155,7 +156,7 @@ class MVSSystem(LightningModule):
         img_loss = img2mse(rgb, target_s)
         loss = loss + img_loss
 
-        if(self.args.net_type=="neus" and not args.no_eikonal):
+        if('neus' in self.args.net_type and not args.no_eikonal):
             eikonal_loss = torch.mean(torch.sum(sdf_gradients * sdf_gradients, -1))
             self.log('train/eikonal_loss', eikonal_loss.item(), prog_bar=True)
             loss += eikonal_loss
@@ -178,6 +179,11 @@ class MVSSystem(LightningModule):
             self.log('train/loss', loss, prog_bar=True)
             self.log('train/img_mse_loss', img_loss.item(), prog_bar=False)
             self.log('train/PSNR', psnr.item(), prog_bar=True)
+            if(self.ema == None):
+                self.ema = img_loss.item()
+            else:
+                self.ema = 0.95 * self.ema + 0.05 * img_loss.item()
+            self.log('train/ema', self.ema, prog_bar=True)
 
         if self.global_step % 20000==19999:
             self.save_ckpt(f'{self.global_step}')
@@ -220,8 +226,8 @@ class MVSSystem(LightningModule):
                 rays_pts, rays_dir, rays_NDC, depth_candidates, rays_o, ndc_parameters = \
                     build_rays_test(H, W, tgt_to_world, world_to_ref, intrinsic, near_fars, near_fars[-1], args.N_samples, pad=args.pad, chunk=args.chunk, idx=chunk_idx)
 
-                if(self.args.net_type=="neus" and args.neus_sampling):
-                    rays_pts, depth_candidates, rays_NDC = gen_pts_neus(rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
+                if('neus' in self.args.net_type and args.neus_sampling):
+                    rays_pts, depth_candidates, rays_NDC = gen_pts_neus(rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, near_fars[-1], args, False, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
 
 
                 # rendering

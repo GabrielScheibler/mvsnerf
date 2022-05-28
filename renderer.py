@@ -248,7 +248,7 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
     # dirs = world_to_sdf_input_space_dirs(pose_ref, rays_dir_n, inv_scale)
 
     # rays_ndc = rays_ndc * 2 - 1.0
-    if args.net_type == 'neus':
+    if 'neus' in args.net_type :
         H, W = imgs.shape[-2:]
         H, W = int(H), int(W)
         inv_scale = torch.tensor([W-1, H-1]).cuda()
@@ -307,7 +307,7 @@ def mesh_rendering(args, pose_ref, rays_pts, rays_pts_ndc, inv_scale,
     input_pts = world_to_sdf_input_space(pose_ref, rays_pts, inv_scale)
     input_dir = input_pts # dirs are not used for sdf and their values do not matter
 
-    if args.net_type == 'neus':
+    if 'neus' in args.net_type:
         sdf = network_query_fn(input_pts, input_dir, input_feat, network_fn.sdf)
         return sdf
     else:

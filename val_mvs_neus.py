@@ -141,11 +141,13 @@ for i_scene, scene in enumerate([1,8,21,103,114]):#,8,21,103,114
             near = -1
             far = 1
             resolution = 100
-            if args.net_type == 'neus':
+            if 'neus' in args.net_type:
                 threshold = 0.5
             else:
                 threshold = 0.5
             use_alpha = True
+            if(not use_alpha):
+                threshold = 0
             pts, rays_o, rays_d, z_vals = point_grid([near,near,near],[far,far,far],resolution)
             pts, rays_o, rays_d, z_vals = pts.to(device), rays_o.to(device), rays_d.to(device), z_vals.to(device)
             xyz_coarse_sampled = pts

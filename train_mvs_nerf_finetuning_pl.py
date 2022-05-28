@@ -161,9 +161,9 @@ class MVSSystem(LightningModule):
                                          near=self.near_far_source[0], far=self.near_far_source[1], pad=args.pad, lindisp=args.use_disp)
 
         rays_o = rays_o.permute(1,0)
-        if(self.args.net_type=="neus" and args.neus_sampling):
+        if('neus' in self.args.net_type and args.neus_sampling):
             xyz_coarse_sampled, z_vals, xyz_NDC = gen_pts_neus(
-                rays_o, rays_d, self.imgs, self.volume, self.pose_source, args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
+                rays_o, rays_d, self.imgs, self.volume, self.pose_source, self.near_far_source, args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
 
 
         rgbs, disp, acc, depth_pred, alpha, extras, _, _, sdf_gradients = rendering(args, self.pose_source, xyz_coarse_sampled, xyz_NDC, z_vals, rays_o, rays_d, inv_scale, self.get_cos_anneal_ratio(),
@@ -187,7 +187,7 @@ class MVSSystem(LightningModule):
             loss += img_loss
             psnr = mse2psnr2(img_loss.item())
 
-            if(self.args.net_type=="neus" and not args.no_eikonal):
+            if('neus' in self.args.net_type and not args.no_eikonal):
                 eikonal_loss = torch.mean(torch.sum(sdf_gradients * sdf_gradients, -1))
                 self.log('train/eikonal_loss', eikonal_loss.item(), prog_bar=True)
                 loss += eikonal_loss
@@ -239,9 +239,9 @@ class MVSSystem(LightningModule):
                                     near=self.near_far_source[0], far=self.near_far_source[1],pad=args.pad, lindisp=args.use_disp)
 
                 rays_o = rays_o.permute(1,0)
-                if(self.args.net_type=="neus" and args.neus_sampling):
+                if('neus' in self.args.net_type and args.neus_sampling):
                     xyz_coarse_sampled, z_vals, xyz_NDC = gen_pts_neus(
-                        rays_o, rays_d, self.imgs, self.volume, self.pose_source, args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
+                        rays_o, rays_d, self.imgs, self.volume, self.pose_source, self.near_far_source, args, False, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
 
 
                 rgb, disp, acc, depth_pred, alpha, extras, rgb_fg, rgb_bg, sdf_gradients = rendering(args, self.pose_source, xyz_coarse_sampled, xyz_NDC, z_vals, rays_o, rays_d, inv_scale, self.get_cos_anneal_ratio(),

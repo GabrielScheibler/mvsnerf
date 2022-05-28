@@ -25,7 +25,7 @@ def config_parser(cmd=None):
     parser.add_argument("--dir_dim", type=int, default=3)
     parser.add_argument("--alpha_feat_dim", type=int, default=8)
     parser.add_argument('--net_type', type=str, default='neus',
-                        choices=['v0', 'v1', 'v2', 'neus'])
+                        choices=['v0', 'v1', 'v2', 'neus', 'neus1', 'neus2'])
     parser.add_argument('--dataset_name', type=str, default='blender',
                         choices=['dtu', 'blender', 'llff', 'dtu_ft'])
     parser.add_argument('--use_color_volume', default=False, action="store_true",

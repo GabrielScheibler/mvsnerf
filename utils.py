@@ -932,9 +932,9 @@ def print_frustum(pose_ref, inv_scale, ref_idx=0):
     print(frustum_corners_world)
     return
 
-def gen_pts_feats_no_ndc(imgs, volume_feature, rays_pts, pose_ref, feat_dim, img_feat=None, img_downscale=1.0, use_color_volume=False, net_type='v0', ref_idx=0):
+def gen_pts_feats_no_ndc(imgs, volume_feature, rays_pts, pose_ref, feat_dim, img_feat=None, img_downscale=1.0, use_color_volume=False, net_type='v0', ref_idx=0, pad=0):
 
-    rays_ndc = get_ndc_points(pose_ref, rays_pts, imgs, ref_idx=ref_idx)
+    rays_ndc = get_ndc_points(pose_ref, rays_pts, imgs, ref_idx=ref_idx, pad=pad)
 
     N_rays, N_samples = rays_pts.shape[:2]
     if img_feat is not None:
@@ -950,7 +950,7 @@ def gen_pts_feats_no_ndc(imgs, volume_feature, rays_pts, pose_ref, feat_dim, img
 
     return input_feat
 
-def get_ndc_points(pose_ref, rays_pts, imgs, ref_idx=0):
+def get_ndc_points(pose_ref, rays_pts, imgs, ref_idx=0, pad=0):
     N, V, C, H, W = imgs.shape
 
     w2c_ref, intrinsic_ref = pose_ref['w2cs'][ref_idx], pose_ref['intrinsics'][ref_idx]  # assume camera 0 is reference
@@ -959,7 +959,7 @@ def get_ndc_points(pose_ref, rays_pts, imgs, ref_idx=0):
     ray_coordinate_ref = []
     near_ref, far_ref = pose_ref['near_fars'][ref_idx, 0], pose_ref['near_fars'][ref_idx, 1]
 
-    points_ndc = get_ndc_coordinate(w2c_ref, intrinsic_ref, rays_pts, inv_scale, near=near_ref, far=far_ref, pad=0) #ndc = normalized device coordinates
+    points_ndc = get_ndc_coordinate(w2c_ref, intrinsic_ref, rays_pts, inv_scale, near=near_ref, far=far_ref, pad=pad) #ndc = normalized device coordinates
 
     return points_ndc
 
@@ -971,22 +971,35 @@ def near_far_from_sphere(rays_o, rays_d):
     far = mid + 1.0
     return near, far
 
-def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, args, perturb, sdf_network, network_query_fn, n_samples=64, n_outside=32, n_importance=64, up_sample_steps=4):
+def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target, args, perturb, sdf_network, network_query_fn, n_samples=64, n_outside=0, n_importance=64, up_sample_steps=4):
     batch_size, _ = rays_o.shape
     N, V, C, H, W = imgs.shape
     inv_scale = torch.tensor([W-1, H-1]).cuda()
-    near, far = near_far_from_sphere(rays_o, rays_d)
+    # near, far = near_far_from_sphere(rays_o, rays_d)
     #sample_dist = 2.0 / n_samples   # Assuming the region of interest is a unit sphere
-    z_vals = torch.linspace(0.0, 1.0, n_samples).cuda()
-    z_vals = near.cuda() + (far.cuda() - near.cuda()) * z_vals[None, :].cuda()
+    near, far = near_far_target
+    # z_vals = torch.linspace(0.0, 1.0, n_samples).cuda()
+    # z_vals = near.cuda() + (far.cuda() - near.cuda()) * z_vals[None, :].cuda()
+
+    t_vals = torch.linspace(0., 1., steps=n_samples).view(1,n_samples).cuda()
+    depth_candidate = near * (1. - t_vals) + far * (t_vals)
+    depth_candidate = depth_candidate.expand([batch_size, n_samples])
+    z_vals = depth_candidate
 
     z_vals_outside = None
     if n_outside > 0:
         z_vals_outside = torch.linspace(1e-3, 1.0 - 1.0 / (n_outside + 1.0), n_outside)
 
     if perturb > 0:
-        t_rand = (torch.rand([batch_size, 1]) - 0.5).cuda()
-        z_vals = z_vals + t_rand * 2.0 / n_samples
+        # t_rand = (torch.rand([batch_size, 1]) - 0.5).cuda()
+        # z_vals = z_vals + t_rand * 2.0 / n_samples
+
+        mids = .5 * (depth_candidate[..., 1:] + depth_candidate[..., :-1])
+        upper = torch.cat([mids, depth_candidate[..., -1:]], -1)
+        lower = torch.cat([depth_candidate[..., :1], mids], -1)
+        # stratified samples in those intervals
+        t_rand = torch.rand(depth_candidate.shape).cuda()
+        z_vals = lower + (upper - lower) * t_rand
 
         if n_outside > 0:
             mids = .5 * (z_vals_outside[..., 1:] + z_vals_outside[..., :-1])
@@ -1007,6 +1020,9 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, args, perturb, 
             pts_world = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]
             pts = world_to_sdf_input_space(pose_ref, pts_world, inv_scale)
 
+            pts_norm = torch.linalg.norm(pts, ord=2, dim=-1)
+            inside_sphere = pts_norm < 1.0
+
             input_feat = gen_pts_feats_no_ndc(imgs, volume_feature, pts_world,
                                                     pose_ref,
                                                     args.feat_dim,
@@ -1014,10 +1030,12 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, args, perturb, 
                                                     img_downscale=args.img_downscale,
                                                     use_color_volume=args.use_color_volume,
                                                     net_type=args.net_type,
-                                                    ref_idx=0)
+                                                    ref_idx=0,
+                                                    pad=args.pad)
 
-            # sdf = sdf_network.sdf(pts.reshape(-1, 3),input_feat.reshape(-1,input_feat.size()[-1])).reshape(batch_size, n_samples)
+            # input views are not used in sdf -> pass anything as input views
             sdf = network_query_fn(pts, pts, input_feat, sdf_network.sdf).squeeze()
+            sdf[~inside_sphere] = 100
 
             for i in range(up_sample_steps):
                 new_z_vals = up_sample(rays_o,
@@ -1038,7 +1056,8 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, args, perturb, 
                                                     img_downscale=args.img_downscale,
                                                     use_color_volume=args.use_color_volume,
                                                     net_type=args.net_type,
-                                                    ref_idx=0)
+                                                    ref_idx=0,
+                                                    pad=args.pad)
 
                 z_vals, sdf = cat_z_vals(sdf_network,
                                          rays_o,
@@ -1053,9 +1072,17 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, args, perturb, 
 
                 pts_world = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]
                 pts = world_to_sdf_input_space(pose_ref, pts_world, inv_scale)
-                pts_ndc = get_ndc_points(pose_ref, pts_world, imgs, ref_idx=0)
+                pts_ndc = get_ndc_points(pose_ref, pts_world, imgs, ref_idx=0, pad=args.pad)
 
-    return pts_world, z_vals, pts_ndc
+    # Background model
+    if n_outside > 0:
+        z_vals_feed = torch.cat([z_vals, z_vals_outside], dim=-1)
+        z_vals, _ = torch.sort(z_vals_feed, dim=-1)
+
+    pts_world = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]
+    pts_ndc = get_ndc_points(pose_ref, pts_world, imgs, ref_idx=0, pad=args.pad)
+
+    return pts_world.detach(), z_vals.detach(), pts_ndc.detach()
 
 def up_sample(rays_o, rays_d, z_vals, sdf, n_importance, inv_s, pts):
     """
