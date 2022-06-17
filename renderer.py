@@ -253,8 +253,8 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
         H, W = int(H), int(W)
         inv_scale = torch.tensor([W-1, H-1]).cuda()
         
-        input_pts = world_to_sdf_input_space(pose_ref, rays_pts, inv_scale)
-        input_dir = world_to_sdf_input_space_dirs(pose_ref, rays_dir[:,None,:], inv_scale).squeeze(1)
+        input_pts = world_to_sdf_input_space(pose_ref, rays_pts, args, inv_scale)
+        input_dir = world_to_sdf_input_space_dirs(pose_ref, rays_dir[:,None,:], args, inv_scale).squeeze(1)
 
         pts_norm = torch.linalg.norm(rays_pts, ord=2, dim=-1)
         inside_sphere = (pts_norm < 1.0).float().detach()
@@ -304,7 +304,7 @@ def mesh_rendering(args, pose_ref, rays_pts, rays_pts_ndc, inv_scale,
     H, W = int(H), int(W)
     inv_scale = torch.tensor([W-1, H-1]).cuda()
     
-    input_pts = world_to_sdf_input_space(pose_ref, rays_pts, inv_scale)
+    input_pts = world_to_sdf_input_space(pose_ref, rays_pts, args, inv_scale)
     input_dir = input_pts # dirs are not used for sdf and their values do not matter
 
     if 'neus' in args.net_type:

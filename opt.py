@@ -90,6 +90,10 @@ def config_parser(cmd=None):
                         help='use neus sampling method')
     parser.add_argument("--no_eikonal", default=False, action='store_true',
                         help='do not use eikonal loss function')
+    parser.add_argument("--frustum_sampling", default=False, action='store_true',
+                        help='use neus sampling method to sample only within the view frustum')
+    parser.add_argument("--rotate_space", default=False, action='store_true',
+                        help='rotated the sdf input space towards the target view')
 
 
 

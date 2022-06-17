@@ -985,9 +985,9 @@ class Renderer_Neus_Foreground1(nn.Module):
         self.d_sdf_feature = 128
         self.d_normals = input_ch
 
-        self.sdf_network = SDFNetwork(input_ch, input_ch_views, input_ch_feat, self.d_sdf_feature+1)
-        self.rendering_network = RenderingNetwork(input_ch, self.d_normals, input_ch_views, input_ch_feat, self.d_sdf_feature)
-        self.deviation_network = SingleVarianceNetwork(0.3)
+        self.sdf_network = SDFNetwork1(input_ch, input_ch_views, input_ch_feat, self.d_sdf_feature+1)
+        self.rendering_network = RenderingNetwork1(input_ch, self.d_normals, input_ch_views, input_ch_feat, self.d_sdf_feature)
+        self.deviation_network = SingleVarianceNetwork1(0.3)
 
     def forward_alpha(self,x):
         return None
@@ -1053,7 +1053,7 @@ class SDFNetwork1(nn.Module):
         self.num_layers = len(dims)
         self.skip_in = skip_in
         self.scale = scale
-        self.d_bottleneck_feat = 10
+        self.d_bottleneck_feat = 64
 
         for l in range(0, self.num_layers - 1):
             if l + 1 in self.skip_in:
@@ -1163,6 +1163,8 @@ class RenderingNetwork1(nn.Module):
         self.squeeze_out = squeeze_out
         dims = [d_in + d_in_normals + d_in_views + d_in_mvs_feat + d_in_sdf_feat] + [d_hidden for _ in range(n_layers)] + [d_out]
 
+        self.d_bottleneck_feat = 64
+
         self.embednorms_fn = None
         if multires_norms > 0:
             embednorms_fn, input_ch = get_embedder(multires_norms)
@@ -1187,7 +1189,7 @@ class RenderingNetwork1(nn.Module):
                 setattr(self, "bias_lin" + str(l), pts_bias)
 
         self.relu = nn.ReLU()
-        self.pts_bias = nn.Linear(d_in_mvs_feat + d_in_sdf_feat + d_in_normals + d_in_views, d_hidden)
+        self.pts_bias = nn.Linear(d_in_mvs_feat + d_in_sdf_feat + d_in_normals + d_in_views, self.d_bottleneck_feat)
 
     def forward(self, points, normals, view_dirs, mvs_feature_vector, sdf_feature_vector):
         if self.embednorms_fn is not None:
@@ -1197,13 +1199,13 @@ class RenderingNetwork1(nn.Module):
 
         x = rendering_input
         bias = self.pts_bias(torch.cat([view_dirs, normals, mvs_feature_vector, sdf_feature_vector], dim=-1))
-        bias = self.activation(bias)
+        bias = self.relu(bias)
         for l in range(0, self.num_layers - 1):
             lin = getattr(self, "lin" + str(l))
 
             if(l > 0):
                 bias_lin = getattr(self, "bias_lin" + str(l))
-                x = x + self.activation(bias_lin(bias))
+                x = x + self.relu(bias_lin(bias))
 
             x = lin(x)
 
@@ -1608,7 +1610,7 @@ class MVSNeRF(nn.Module):
         sdf = self.nerf.sdf(x)
         return sdf
 
-def create_nerf_mvs(args, pts_embedder=True, use_mvs=False, dir_embedder=True):
+def create_nerf_mvs(args, pts_embedder=True, use_mvs=False, dir_embedder=True, finetuning=False):
     """Instantiate mvs NeRF's MLP model.
     """
 
@@ -1647,7 +1649,8 @@ def create_nerf_mvs(args, pts_embedder=True, use_mvs=False, dir_embedder=True):
     EncodingNet = None
     if use_mvs:
         EncodingNet = MVSNet().to(device)
-        grad_vars += list(EncodingNet.parameters())    #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        if not finetuning:
+            grad_vars += list(EncodingNet.parameters())    #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     start = 0
 

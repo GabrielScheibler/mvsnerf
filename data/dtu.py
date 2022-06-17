@@ -117,7 +117,8 @@ class MVSDatasetDTU(Dataset):
             intrinsic, extrinsic, near_far = self.read_cam_file(
                 proj_mat_filename)
 
-            #rotate translation vector from scale matrix to camera space
+            #scale extrinsic matrix by scaling matrix without getting an invalid rotation matrix:
+            #rotate translation vector of scale matrix to camera space
             t = extrinsic[:3,:3] @ self.scale_mat[:3,-1]
             #add translation vector to extrinsic matrix translation
             extrinsic[:3,-1] += t

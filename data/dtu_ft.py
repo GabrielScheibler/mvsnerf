@@ -102,12 +102,14 @@ class DTU_ft(Dataset):
 
         imgs, proj_mats = [], []
         intrinsics, c2ws, w2cs = [],[],[]
+        near_fars = []
         for i,idx in enumerate(pair_idx):
             proj_mat_filename = os.path.join(self.root_dir, f'Cameras/train/{idx:08d}_cam.txt')
             intrinsic, w2c, near_far_source = self.read_cam_file(proj_mat_filename)
             c2w = np.linalg.inv(w2c)
             c2ws.append(c2w)
             w2cs.append(w2c)
+            near_fars.append(near_far_source)
 
             # build proj mat from source views to ref view
             proj_mat_l = np.eye(4)
@@ -132,6 +134,7 @@ class DTU_ft(Dataset):
         pose_source['c2ws'] = torch.from_numpy(np.stack(c2ws)).float().to(device)
         pose_source['w2cs'] = torch.from_numpy(np.stack(w2cs)).float().to(device)
         pose_source['intrinsics'] = torch.from_numpy(np.stack(intrinsics)).float().to(device)
+        pose_source['near_fars'] = torch.from_numpy(np.stack(near_fars)).float().to(device)
 
         imgs = torch.stack(imgs).float().unsqueeze(0).to(device)
         proj_mats = torch.from_numpy(np.stack(proj_mats)[:,:3]).float().unsqueeze(0).to(device)

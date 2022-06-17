@@ -40,8 +40,13 @@ class MVSSystem(LightningModule):
         self.loss = SL1Loss()
 
         # Create nerf model
-        self.render_kwargs_train, self.render_kwargs_test, start, self.grad_vars = create_nerf_mvs(args, use_mvs=True, dir_embedder=False, pts_embedder=True)
+        self.render_kwargs_train, self.render_kwargs_test, start, self.grad_vars = create_nerf_mvs(args, use_mvs=True, dir_embedder=False, pts_embedder=True, finetuning=True)
         filter_keys(self.render_kwargs_train)
+
+        pytorch_total_params_fn = sum(p.numel() for p in self.render_kwargs_train['network_fn'].parameters() if p.requires_grad)
+        pytorch_total_params_mvs = sum(p.numel() for p in self.render_kwargs_train['network_mvs'].parameters() if p.requires_grad)
+        print('params_fn: ', pytorch_total_params_fn)
+        print('params_mvs: ', pytorch_total_params_mvs)
 
         # Create mvs model
         self.MVSNet = self.render_kwargs_train['network_mvs']
@@ -160,7 +165,6 @@ class MVSSystem(LightningModule):
             xyz_NDC = get_ndc_coordinate(w2c_ref, intrinsic_ref, xyz_coarse_sampled, inv_scale,
                                          near=self.near_far_source[0], far=self.near_far_source[1], pad=args.pad, lindisp=args.use_disp)
 
-        rays_o = rays_o.permute(1,0)
         if('neus' in self.args.net_type and args.neus_sampling):
             xyz_coarse_sampled, z_vals, xyz_NDC = gen_pts_neus(
                 rays_o, rays_d, self.imgs, self.volume, self.pose_source, self.near_far_source, args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
@@ -238,7 +242,7 @@ class MVSSystem(LightningModule):
                     xyz_NDC = get_ndc_coordinate(w2c_ref, intrinsic_ref, xyz_coarse_sampled, inv_scale,
                                     near=self.near_far_source[0], far=self.near_far_source[1],pad=args.pad, lindisp=args.use_disp)
 
-                rays_o = rays_o.permute(1,0)
+
                 if('neus' in self.args.net_type and args.neus_sampling):
                     xyz_coarse_sampled, z_vals, xyz_NDC = gen_pts_neus(
                         rays_o, rays_d, self.imgs, self.volume, self.pose_source, self.near_far_source, args, False, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
@@ -281,7 +285,6 @@ class MVSSystem(LightningModule):
         return log
 
     def get_cos_anneal_ratio(self):
-        return 1.0
         if self.args.anneal_end == 0.0:
             return 1.0
         else:

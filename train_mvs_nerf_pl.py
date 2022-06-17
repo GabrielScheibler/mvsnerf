@@ -46,6 +46,11 @@ class MVSSystem(LightningModule):
         self.render_kwargs_train, self.render_kwargs_test, start, self.grad_vars = create_nerf_mvs(args, use_mvs=True, dir_embedder=False, pts_embedder=True)
         filter_keys(self.render_kwargs_train)
 
+        pytorch_total_params_fn = sum(p.numel() for p in self.render_kwargs_train['network_fn'].parameters() if p.requires_grad)
+        pytorch_total_params_mvs = sum(p.numel() for p in self.render_kwargs_train['network_mvs'].parameters() if p.requires_grad)
+        print('params_fn: ', pytorch_total_params_fn)
+        print('params_mvs: ', pytorch_total_params_mvs)
+
         # Create mvs model
         self.MVSNet = self.render_kwargs_train['network_mvs']
         self.render_kwargs_train.pop('network_mvs')

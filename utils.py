@@ -862,20 +862,22 @@ def rotate_2d(axis, points, angle):
 
     return points
 
-def world_to_sdf_input_space(pose_ref, point_samples, inv_scale=None):
+def world_to_sdf_input_space(pose_ref, point_samples, args, inv_scale=None):
     ref_idx = -1
     pad = 24
     # points = points_w2c_unitspshere(pose_ref, point_samples, inv_scale, ref_idx)
     # points = get_ndc_coordinate(pose_ref['w2cs'][ref_idx], pose_ref['intrinsics'][ref_idx], point_samples, inv_scale, near=pose_ref['near_fars'][ref_idx][0], far=pose_ref['near_fars'][ref_idx][1], pad=pad)
     # points = rotate_unitsphere(pose_ref, point_samples, ref_idx)
-    points = rotate_unitsphere_2D(pose_ref, point_samples, ref_idx)
-    # points = point_samples
+    if args.rotate_space:
+        points = rotate_unitsphere_2D(pose_ref, point_samples, ref_idx)
+    else:
+        points = point_samples
     return points
 
-def world_to_sdf_input_space_dirs(pose_ref, point_samples, inv_scale=None): 
+def world_to_sdf_input_space_dirs(pose_ref, point_samples, args, inv_scale=None): 
     zero_points = torch.zeros_like(point_samples)
-    dir_points = world_to_sdf_input_space(pose_ref, point_samples, inv_scale)
-    zero_points = world_to_sdf_input_space(pose_ref, zero_points, inv_scale)
+    dir_points = world_to_sdf_input_space(pose_ref, point_samples, args, inv_scale)
+    zero_points = world_to_sdf_input_space(pose_ref, zero_points, args, inv_scale)
     dirs = dir_points - zero_points
 
     # dirs = dirs / (torch.sum(dirs, dim=-1, keepdim=True) + 1e-5)
@@ -886,20 +888,22 @@ def world_to_sdf_input_space_dirs(pose_ref, point_samples, inv_scale=None):
     # dirs = dirs.reshape(nr, ns, 3)
     return dirs
 
-def sdf_input_space_to_world(pose_ref, point_samples, inv_scale=None):
+def sdf_input_space_to_world(pose_ref, point_samples, args, inv_scale=None):
     ref_idx = -1
     pad = 24
     # points = points_c2w_unitspshere(pose_ref, point_samples, inv_scale, ref_idx)
     # points = inverse_get_ndc_coordinate(pose_ref['c2ws'][ref_idx], pose_ref['intrinsics'][ref_idx], point_samples, inv_scale, near=pose_ref['near_fars'][ref_idx][0], far=pose_ref['near_fars'][ref_idx][1], pad=pad)
     # points = inverse_rotate_unitsphere(pose_ref, point_samples, ref_idx)
-    points = inverse_rotate_unitsphere_2D(pose_ref, point_samples, ref_idx)
-    # points = point_samples
+    if args.rotate_space:
+        points = inverse_rotate_unitsphere_2D(pose_ref, point_samples, ref_idx)
+    else:
+        points = point_samples
     return points
 
-def sdf_input_space_to_world_dirs(pose_ref, point_samples, inv_scale=None):
+def sdf_input_space_to_world_dirs(pose_ref, point_samples, args, inv_scale=None):
     zero_points = torch.zeros_like(point_samples)
-    dir_points = sdf_input_space_to_world(pose_ref, point_samples, inv_scale)
-    zero_points = sdf_input_space_to_world(pose_ref, zero_points, inv_scale)
+    dir_points = sdf_input_space_to_world(pose_ref, point_samples, args, inv_scale)
+    zero_points = sdf_input_space_to_world(pose_ref, zero_points, args, inv_scale)
     dirs = dir_points - zero_points
 
     # dirs = dirs / (torch.sum(dirs, dim=-1, keepdim=True) + 1e-5)
@@ -971,13 +975,19 @@ def near_far_from_sphere(rays_o, rays_d):
     far = mid + 1.0
     return near, far
 
-def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target, args, perturb, sdf_network, network_query_fn, n_samples=64, n_outside=0, n_importance=64, up_sample_steps=4):
+def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target, args, perturb, sdf_network, network_query_fn, n_samples=64, n_outside=32, n_importance=32, up_sample_steps=4):
     batch_size, _ = rays_o.shape
     N, V, C, H, W = imgs.shape
     inv_scale = torch.tensor([W-1, H-1]).cuda()
-    # near, far = near_far_from_sphere(rays_o, rays_d)
+    near, far = near_far_from_sphere(rays_o, rays_d)
+    if args.frustum_sampling:
+        near, far = near_far_target
+        n_samples = 64
+        n_importance = 64
+        n_outside = 0
+        up_sample_steps = 4
     #sample_dist = 2.0 / n_samples   # Assuming the region of interest is a unit sphere
-    near, far = near_far_target
+    # near, far = ear_far_target
     # z_vals = torch.linspace(0.0, 1.0, n_samples).cuda()
     # z_vals = near.cuda() + (far.cuda() - near.cuda()) * z_vals[None, :].cuda()
 
@@ -1018,7 +1028,7 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target
     if n_importance > 0:
         with torch.no_grad():
             pts_world = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]
-            pts = world_to_sdf_input_space(pose_ref, pts_world, inv_scale)
+            pts = world_to_sdf_input_space(pose_ref, pts_world, args, inv_scale)
 
             pts_norm = torch.linalg.norm(pts, ord=2, dim=-1)
             inside_sphere = pts_norm < 1.0
@@ -1035,7 +1045,7 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target
 
             # input views are not used in sdf -> pass anything as input views
             sdf = network_query_fn(pts, pts, input_feat, sdf_network.sdf).squeeze()
-            sdf[~inside_sphere] = 100
+            #sdf[~inside_sphere] = 100
 
             for i in range(up_sample_steps):
                 new_z_vals = up_sample(rays_o,
@@ -1047,7 +1057,7 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target
                                             pts)
 
                 new_pts_world = rays_o[:, None, :] + rays_d[:, None, :] * new_z_vals[..., :, None]
-                new_pts = world_to_sdf_input_space(pose_ref, new_pts_world, inv_scale)
+                new_pts = world_to_sdf_input_space(pose_ref, new_pts_world, args, inv_scale)
 
                 input_feat = gen_pts_feats_no_ndc(imgs, volume_feature, new_pts_world,
                                                     pose_ref,
@@ -1071,7 +1081,7 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target
                                          last=(i + 1 == up_sample_steps))
 
                 pts_world = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]
-                pts = world_to_sdf_input_space(pose_ref, pts_world, inv_scale)
+                pts = world_to_sdf_input_space(pose_ref, pts_world, args, inv_scale)
                 pts_ndc = get_ndc_points(pose_ref, pts_world, imgs, ref_idx=0, pad=args.pad)
 
     # Background model
