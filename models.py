@@ -599,6 +599,9 @@ class Renderer_Neus_Background(nn.Module):
         self.rgb_linear.apply(weights_init)
 
     def forward_alpha(self,x):
+        batch_size, n_samples, _ = x.shape
+        x = x.reshape(-1,x.shape[2])
+
         dim = x.shape[-1]
         input_pts, input_feats = torch.split(x, [self.in_ch_pts, self.in_ch_feat], dim=-1)
 
@@ -612,9 +615,13 @@ class Renderer_Neus_Background(nn.Module):
 
         alpha = self.alpha_linear(h)
         print("using non-functional forward_alpha method")
+        alpha = alpha.reshape(batch_size,n_samples,-1)
         return alpha
 
     def forward(self, x):
+        batch_size, n_samples, _ = x.shape
+        x = x.reshape(-1,x.shape[2])
+
         dim = x.shape[-1]
         in_ch_feat = dim-self.in_ch_pts-self.in_ch_views
         input_pts, input_feats, input_views = torch.split(x, [self.in_ch_pts, in_ch_feat, self.in_ch_views], dim=-1)
@@ -642,6 +649,8 @@ class Renderer_Neus_Background(nn.Module):
         else:
             outputs = self.output_linear(h)
 
+        outputs = outputs.reshape(batch_size,n_samples,-1)
+
         return outputs
 
 class Renderer_Neus_Foreground(nn.Module):
@@ -654,7 +663,7 @@ class Renderer_Neus_Foreground(nn.Module):
         self.in_ch_pts, self.in_ch_views, self.in_ch_feat = input_ch, input_ch_views, input_ch_feat
 
         self.d_sdf_feature = 128
-        self.d_normals = input_ch
+        self.d_normals = input_ch_views
 
         self.sdf_network = SDFNetwork(input_ch, input_ch_views, input_ch_feat, self.d_sdf_feature+1)
         self.rendering_network = RenderingNetwork(input_ch, self.d_normals, input_ch_views, input_ch_feat, self.d_sdf_feature)
@@ -664,6 +673,8 @@ class Renderer_Neus_Foreground(nn.Module):
         return None
 
     def forward(self, x):
+        batch_size, n_samples, _ = x.shape
+        x = x.reshape(-1,x.shape[2])
         input_pts, input_feats, input_views = torch.split(x, [self.in_ch_pts, self.in_ch_feat, self.in_ch_views], dim=-1)
 
         sdf_output = self.sdf_network.forward(x)
@@ -672,15 +683,18 @@ class Renderer_Neus_Foreground(nn.Module):
         sdf_distance = sdf_output[...,:1]
         sdf_gradients = self.sdf_network.gradient(x)
         sdf_gradients_pts, sdf_gradients_feats, sdf_gradients_views = torch.split(sdf_gradients, [self.in_ch_pts, self.in_ch_feat, self.in_ch_views], dim=-1)
+        sdf_gradients_pts = sdf_gradients_pts[...,:3]
 
         rendering_output = self.rendering_network.forward(input_pts, sdf_gradients_pts, input_views, input_feats, sdf_feature_vector)
         rgb = rendering_output
 
         inv_s = self.deviation_network(torch.zeros([1, 3]))[:, :1].clip(1e-6, 1e6)           # Single parameter
-        batch_size, n_samples, _ = x.shape
         inv_s = inv_s.expand(batch_size, n_samples, 1)
+        rgb = rgb.reshape(batch_size,n_samples,-1)
+        sdf_distance = sdf_distance.reshape(batch_size,n_samples,-1)
+        sdf_gradients_pts = sdf_gradients_pts.reshape(batch_size,n_samples,-1)
 
-        return torch.cat([rgb, sdf_distance, sdf_gradients_pts[...,:3], inv_s], -1)
+        return torch.cat([rgb, sdf_distance, sdf_gradients_pts, inv_s], -1)
     
     def sdf(self,x):
         sdf_output = self.sdf_network.forward(x)
@@ -704,9 +718,9 @@ class SDFNetwork(nn.Module):
                  d_in_feat,
                  d_out,
                  d_hidden=128,
-                 n_layers=10,
+                 n_layers=8,
                  skip_in=(4,),
-                 multires=0,
+                 multires=10,
                  bias=0.5,
                  scale=1,
                  geometric_init=True,
@@ -718,11 +732,18 @@ class SDFNetwork(nn.Module):
         self.d_in_view = d_in_view
         self.d_in_feat = d_in_feat
 
+        if multires > 0:
+            embed_fn, input_ch = get_embedder(10, input_dims=3)
+            self.embed_fn_fine = embed_fn
+            #dims[0] = input_ch
+
         dims = [d_in + d_in_feat] + [d_hidden for _ in range(n_layers)] + [d_out]
 
         self.num_layers = len(dims)
         self.skip_in = skip_in
         self.scale = scale
+
+
 
         for l in range(0, self.num_layers - 1):
             if l + 1 in self.skip_in:
@@ -766,6 +787,10 @@ class SDFNetwork(nn.Module):
     def forward(self, inputs):
         inputs_all = inputs * self.scale
         input_pts, input_feats, input_views = torch.split(inputs, [self.d_in, self.d_in_feat, self.d_in_view], dim=-1)
+
+        if self.embed_fn_fine is not None:
+            input_pts = self.embed_fn_fine(input_pts[...,:3])
+
         inputs = torch.cat([input_pts, input_feats], -1)
 
         x = torch.cat([input_pts, input_feats], -1)
@@ -815,20 +840,22 @@ class RenderingNetwork(nn.Module):
                  d_in_sdf_feat,
                  d_out=3,
                  d_hidden=128,
-                 n_layers=10,
+                 n_layers=8,
                  weight_norm=True,
-                 multires_norms=0,
+                 multires_norms=4,
                  squeeze_out=True):
         super().__init__()
-
-        self.squeeze_out = squeeze_out
-        dims = [d_in + d_in_normals + d_in_views + d_in_mvs_feat + d_in_sdf_feat] + [d_hidden for _ in range(n_layers)] + [d_out]
 
         self.embednorms_fn = None
         if multires_norms > 0:
             embednorms_fn, input_ch = get_embedder(multires_norms)
             self.embednorms_fn = embednorms_fn
-            dims[0] += (input_ch - 3)
+            d_in_normals = input_ch
+            #dims[0] += (input_ch - 3)
+
+        self.squeeze_out = squeeze_out
+        dims = [d_in + d_in_normals + d_in_views + d_in_mvs_feat + d_in_sdf_feat] + [d_hidden for _ in range(n_layers)] + [d_out]
+
 
         self.num_layers = len(dims)
 
@@ -846,7 +873,7 @@ class RenderingNetwork(nn.Module):
 
     def forward(self, points, normals, view_dirs, mvs_feature_vector, sdf_feature_vector):
         if self.embednorms_fn is not None:
-            normals = self.embednorms_fn(normals)
+            normals = self.embednorms_fn(normals[...,:3])
 
         rendering_input = torch.cat([points, view_dirs, normals, mvs_feature_vector, sdf_feature_vector], dim=-1)
 
@@ -1033,7 +1060,7 @@ class SDFNetwork1(nn.Module):
                  d_in_feat,
                  d_out,
                  d_hidden=128,
-                 n_layers=10,
+                 n_layers=8,
                  skip_in=(4,),
                  multires=0,
                  bias=0.5,
@@ -1154,7 +1181,7 @@ class RenderingNetwork1(nn.Module):
                  d_in_sdf_feat,
                  d_out=3,
                  d_hidden=128,
-                 n_layers=10,
+                 n_layers=8,
                  weight_norm=True,
                  multires_norms=0,
                  squeeze_out=True):
@@ -1383,7 +1410,7 @@ class SDFNetwork2(nn.Module):
                  d_in_feat,
                  d_out,
                  d_hidden=128,
-                 n_layers=10,
+                 n_layers=8,
                  skip_in=(4,),
                  multires=0,
                  bias=0.5,
@@ -1500,7 +1527,7 @@ class RenderingNetwork2(nn.Module):
                  d_in_sdf_feat,
                  d_out=3,
                  d_hidden=128,
-                 n_layers=10,
+                 n_layers=8,
                  weight_norm=True,
                  multires_norms=0,
                  squeeze_out=True):
@@ -1634,12 +1661,14 @@ def create_nerf_mvs(args, pts_embedder=True, use_mvs=False, dir_embedder=True, f
     grad_vars = []
     grad_vars += list(model.parameters())
 
+
     model_fine = None
     if args.N_importance > 0:
         model_fine = MVSNeRF(D=args.netdepth, W=args.netwidth,
                  input_ch_pts=input_ch, skips=skips,
                  input_ch_views=input_ch_views, input_ch_feat=args.feat_dim).to(device)
         grad_vars += list(model_fine.parameters())
+
 
     network_query_fn = lambda pts, viewdirs, rays_feats, network_fn: run_network_mvs(pts, viewdirs, rays_feats, network_fn,
                                                                         embed_fn=embed_fn,
@@ -1652,9 +1681,10 @@ def create_nerf_mvs(args, pts_embedder=True, use_mvs=False, dir_embedder=True, f
         if not finetuning:
             grad_vars += list(EncodingNet.parameters())    #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
+
     start = 0
 
-
+    
     ##########################
 
     # Load checkpoints

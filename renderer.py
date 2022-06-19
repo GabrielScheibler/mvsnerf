@@ -178,7 +178,7 @@ def transform_raw_neus(raw, pts, dirs, cos_anneal_ratio):
 
         sigma = - torch.log(1-alpha).reshape(batch_size, n_samples, 1)
 
-        return torch.cat([sampled_color, sigma], -1), gradients
+        return torch.cat([sampled_color, sigma], -1), gradients, torch.mean(inv_s)
 
 def gen_angle_feature(c2ws, rays_pts, rays_dir):
     """
@@ -261,23 +261,19 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
 
         raw_bg = network_query_fn(rays_pts_ndc, angle, input_feat, network_fn.forward_bg)
         raw_fg_alpha = network_query_fn(input_pts, input_dir, input_feat, network_fn.forward_fg)
-        raw_fg, sdf_gradients = transform_raw_neus(raw_fg_alpha, input_pts, input_dir, cos_anneal_ratio)
+        raw_fg, sdf_gradients, inv_s = transform_raw_neus(raw_fg_alpha, input_pts, input_dir, cos_anneal_ratio)
 
-        # assert torch.isnan(raw_fg.view(-1)).sum().item()==0
-        # assert torch.isnan(raw_bg.view(-1)).sum().item()==0
-        # print(raw_fg[...,3].min())
-        # print(raw_fg[...,3].max())
-        # print(raw_bg[...,3].min())
-        # print(raw_bg[...,3].max())
-        # print('\n')
+        sdf_gradient_error = (torch.linalg.norm(sdf_gradients, ord=2, dim=-1) - 1.0) ** 2
+        sdf_gradient_error = sdf_gradient_error * inside_sphere
+        sdf_gradient_error = sdf_gradient_error.sum() / inside_sphere.sum()
 
         dists = depth2dist(depth_candidates, cos_angle)
         # dists = ndc2dist(rays_ndc)
         rgb_map, disp_map, acc_map, weights, depth_map, alpha = raw2outputs_neus(raw_fg, raw_bg, depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
         rgb_fg, _, _, _, _, _ = raw2outputs_neus(raw_fg, torch.zeros_like(raw_bg), depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
         rgb_bg, _, _, _, _, _ = raw2outputs_neus(torch.zeros_like(raw_fg), raw_bg, depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
-        ret = {}
-        return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_fg, rgb_bg, sdf_gradients
+        ret = {'inv_s' : inv_s}
+        return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_fg, rgb_bg, sdf_gradient_error
 
 
     raw = network_query_fn(rays_pts_ndc, angle, input_feat, network_fn)

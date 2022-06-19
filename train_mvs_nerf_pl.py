@@ -46,6 +46,7 @@ class MVSSystem(LightningModule):
         self.render_kwargs_train, self.render_kwargs_test, start, self.grad_vars = create_nerf_mvs(args, use_mvs=True, dir_embedder=False, pts_embedder=True)
         filter_keys(self.render_kwargs_train)
 
+
         pytorch_total_params_fn = sum(p.numel() for p in self.render_kwargs_train['network_fn'].parameters() if p.requires_grad)
         pytorch_total_params_mvs = sum(p.numel() for p in self.render_kwargs_train['network_mvs'].parameters() if p.requires_grad)
         print('params_fn: ', pytorch_total_params_fn)
@@ -55,6 +56,8 @@ class MVSSystem(LightningModule):
         self.MVSNet = self.render_kwargs_train['network_mvs']
         self.render_kwargs_train.pop('network_mvs')
         self.render_kwargs_train['NDC_local'] = False
+
+        self.NeRF = self.render_kwargs_train['network_fn']
 
         self.eval_metric = [0.01,0.05, 0.1]
 
@@ -136,7 +139,7 @@ class MVSSystem(LightningModule):
                 rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, near_fars.squeeze()[-1], args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
 
 
-        rgb, disp, acc, depth_pred, alpha, ret, _, _, sdf_gradients = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
+        rgb, disp, acc, depth_pred, alpha, ret, _, _, sdf_gradient_error = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
                                                        volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)
 
         #print("outside_rendering: ", torch.var(rgb,dim=1).mean())
@@ -162,32 +165,34 @@ class MVSSystem(LightningModule):
         loss = loss + img_loss
 
         if('neus' in self.args.net_type and not args.no_eikonal):
-            eikonal_loss = torch.mean(torch.sum(sdf_gradients * sdf_gradients, -1))
+            eikonal_loss = sdf_gradient_error
             self.log('train/eikonal_loss', eikonal_loss.item(), prog_bar=True)
             loss += eikonal_loss
 
         if 'rgb0' in ret:
             img_loss_coarse = img2mse(ret['rgb0'], target_s)
             psnr = mse2psnr2(img_loss_coarse.item())
-            self.log('train/PSNR_coarse', psnr.item(), prog_bar=True)
+            self.log('train/PSNR_coarse', psnr.item(), prog_bar=False)
             loss = loss + img_loss_coarse
 
+        if 'inv_s' in ret:
+            self.log('train/inv_s', ret['inv_s'].item(), prog_bar=False)
 
         if args.with_depth:
             psnr = mse2psnr(img2mse(rgb.cpu()[mask], target_s.cpu()[mask]))
             psnr_out = mse2psnr(img2mse(rgb.cpu()[~mask], target_s.cpu()[~mask]))
-            self.log('train/PSNR_out', psnr_out.item(), prog_bar=True)
+            self.log('train/PSNR_out', psnr_out.item(), prog_bar=False)
         else:
             psnr = mse2psnr2(img_loss.item())
 
         with torch.no_grad():
             self.log('train/loss', loss, prog_bar=True)
-            self.log('train/img_mse_loss', img_loss.item(), prog_bar=False)
+            self.log('train/img_mse_loss', img_loss.item(), prog_bar=True)
             self.log('train/PSNR', psnr.item(), prog_bar=True)
             if(self.ema == None):
                 self.ema = img_loss.item()
             else:
-                self.ema = 0.95 * self.ema + 0.05 * img_loss.item()
+                self.ema = 0.99 * self.ema + 0.01 * img_loss.item()
             self.log('train/ema', self.ema, prog_bar=True)
 
         if self.global_step % 20000==19999:
@@ -350,6 +355,8 @@ if __name__ == '__main__':
         debug=False,
         create_git_tag=False
     )
+
+    system.save_ckpt(name='init')
 
     args.num_gpus, args.use_amp = 1, False
     trainer = Trainer(max_epochs=args.num_epochs,

@@ -170,7 +170,7 @@ class MVSSystem(LightningModule):
                 rays_o, rays_d, self.imgs, self.volume, self.pose_source, self.near_far_source, args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
 
 
-        rgbs, disp, acc, depth_pred, alpha, extras, _, _, sdf_gradients = rendering(args, self.pose_source, xyz_coarse_sampled, xyz_NDC, z_vals, rays_o, rays_d, inv_scale, self.get_cos_anneal_ratio(),
+        rgbs, disp, acc, depth_pred, alpha, extras, _, _, sdf_gradient_error = rendering(args, self.pose_source, xyz_coarse_sampled, xyz_NDC, z_vals, rays_o, rays_d, inv_scale, self.get_cos_anneal_ratio(),
                                                        self.volume, self.imgs, img_feat=None,  **self.render_kwargs_train)
 
         # rendering
@@ -192,7 +192,7 @@ class MVSSystem(LightningModule):
             psnr = mse2psnr2(img_loss.item())
 
             if('neus' in self.args.net_type and not args.no_eikonal):
-                eikonal_loss = torch.mean(torch.sum(sdf_gradients * sdf_gradients, -1))
+                eikonal_loss = sdf_gradient_error
                 self.log('train/eikonal_loss', eikonal_loss.item(), prog_bar=True)
                 loss += eikonal_loss
 

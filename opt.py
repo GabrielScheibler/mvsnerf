@@ -36,7 +36,7 @@ def config_parser(cmd=None):
     # training options
     parser.add_argument("--netdepth", type=int, default=6,
                         help='layers in network')
-    parser.add_argument("--netwidth", type=int, default=128,
+    parser.add_argument("--netwidth", type=int, default=256,
                         help='channels per layer')
     parser.add_argument("--netdepth_fine", type=int, default=6,
                         help='layers in fine network')
@@ -84,7 +84,7 @@ def config_parser(cmd=None):
 
 
 
-    parser.add_argument("--anneal_end", type=int, default=150000,
+    parser.add_argument("--anneal_end", type=int, default=50000,
                         help='epoch count when annealing is done')
     parser.add_argument("--neus_sampling", default=False, action='store_true',
                         help='use neus sampling method')

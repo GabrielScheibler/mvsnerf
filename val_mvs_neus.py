@@ -85,7 +85,7 @@ for i_scene, scene in enum:#,8,21,103,114
     psnr,ssim,LPIPS_vgg,rgbs = [],[],[],[]
     cmd = f'--datadir /abyss/home/data/mvsnerf_dtu/mvs_training/dtu/scan{scene}  \
      --dataset_name dtu_ft  \
-     --net_type v0 --ckpt ./ckpts//latest.tar '
+     --net_type neus --ckpt ./ckpts//latest.tar '
 
     args = config_parser(cmd.split())
     args.use_viewdirs = True
@@ -165,7 +165,7 @@ for i_scene, scene in enum:#,8,21,103,114
                 near = -1
                 far = 1
                 resolution = 200
-                use_alpha = True
+                use_alpha = False
 
                 if 'neus' in args.net_type:
                     threshold = 0.5
@@ -197,6 +197,7 @@ for i_scene, scene in enum:#,8,21,103,114
                     rgb, disp, acc, depth_pred, alpha, extras, _, _, _ = rendering(args, pose_source, xyz_coarse_sampled,
                                                                             xyz_NDC, z_vals, rays_o, rays_d, inv_scale, cos_anneal_ratio,
                                                                             volume_feature,imgs_source, **render_kwargs_train)
+
 
                     sdf = 1 - alpha
 
