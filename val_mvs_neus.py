@@ -134,89 +134,6 @@ for i_scene, scene in enum:#,8,21,103,114
         except Exception:     
             pass
 
-        if create_mesh:
-            for i, batch in enumerate(tqdm(dataset_val)):
-                torch.cuda.empty_cache()
-                
-                rays, img = decode_batch(batch)
-                rays = rays.squeeze().to(device)  # (H*W, 3)
-                img = img.squeeze().cpu().numpy()  # (H, W, 3)
-                depth = batch['depth'].squeeze().numpy()  # (H, W)
-            
-                # find nearest image idx from training views
-                positions = dataset_train.poses[:,:3,3]
-                dis = np.sum(np.abs(positions - dataset_val.poses[[i],:3,3]), axis=-1)
-                pair_idx = np.argsort(dis)[:3]
-                pair_idx = [dataset_train.img_idx[item] for item in pair_idx]
-                
-                imgs_source, proj_mats, near_far_source, pose_source = dataset_train.read_source_views(pair_idx=pair_idx,device=device)
-                volume_feature, _, _ = MVSNet(imgs_source, proj_mats, near_far_source, pad=pad)
-                imgs_source = unpreprocess(imgs_source)
-
-                if is_finetuned:   
-                    imgs_source, proj_mats, near_far_source, pose_source = dataset_train.read_source_views(device=device)
-                    imgs_source = unpreprocess(imgs_source)
-                    volume_feature = torch.load(args.ckpt)['volume']['feat_volume']
-                    volume_feature = RefVolume(volume_feature.detach()).cuda()
-                    pad = 24
-
-                # create 3D mesh
-                sdf_all = []
-                near = -1
-                far = 1
-                resolution = 200
-                use_alpha = False
-
-                if 'neus' in args.net_type:
-                    threshold = 0.5
-                    if(not use_alpha):
-                        threshold = 0
-                else:
-                    threshold = 0.5
-
-                pts, rays_o, rays_d, z_vals = point_grid([near,near,near],[far,far,far],resolution)
-                pts, rays_o, rays_d, z_vals = pts.to(device), rays_o.to(device), rays_d.to(device), z_vals.to(device)
-                xyz_coarse_sampled = pts
-
-                # Converting world coordinate to ndc coordinate
-                H, W = img.shape[:2]
-                inv_scale = torch.tensor([W - 1, H - 1]).to(device)
-                w2c_ref, intrinsic_ref = pose_source['w2cs'][0], pose_source['intrinsics'][0].clone()
-                xyz_NDC = get_ndc_coordinate(w2c_ref, intrinsic_ref, xyz_coarse_sampled, inv_scale,
-                                                near=near_far_source[0], far=near_far_source[1], pad=pad*args.imgScale_test)
-
-                # rendering
-                sdf = mesh_rendering(args, pose_source, xyz_coarse_sampled,
-                                        xyz_NDC, inv_scale,
-                                        volume_feature, imgs_source, **render_kwargs_train)
-
-                cos_anneal_ratio = 1.0
-
-                if use_alpha:
-                    # rendering
-                    rgb, disp, acc, depth_pred, alpha, extras, _, _, _ = rendering(args, pose_source, xyz_coarse_sampled,
-                                                                            xyz_NDC, z_vals, rays_o, rays_d, inv_scale, cos_anneal_ratio,
-                                                                            volume_feature,imgs_source, **render_kwargs_train)
-
-
-                    sdf = 1 - alpha
-
-
-                
-                pts_norm = torch.linalg.norm(pts, ord=2, dim=-1)
-                outside_sphere = (pts_norm > 1.0).bool()
-
-                # outside_frame, _ = torch.max(xyz_NDC,dim=-1)
-                # outside_frame = outside_frame > 1
-
-                sdf[outside_sphere] = 1.0
-
-                sdf = sdf.reshape([resolution,resolution,resolution])
-                sdf = sdf.cpu().detach().numpy()
-                validate_mesh(save_dir, sdf, i_scene*1000 + i, world_space=False,
-                            resolution=resolution, threshold=threshold)
-                #3D mesh done
-
         for i, batch in enumerate(tqdm(dataset_val)):
             torch.cuda.empty_cache()
             
@@ -265,10 +182,11 @@ for i_scene, scene in enum:#,8,21,103,114
                 cos_anneal_ratio = 1.0
 
                 # rendering
-                rgb, disp, acc, depth_pred, alpha, extras, _, _, _ = rendering(args, pose_source, xyz_coarse_sampled,
-                                                                       xyz_NDC, z_vals, rays_o, rays_d, inv_scale, cos_anneal_ratio,
-                                                                       volume_feature,imgs_source, **render_kwargs_train)
+                rgb, disp, acc, depth_pred, alpha, extras, rgb_fg, rgb_bg, sdf_gradient_error = rendering(args, pose_source, xyz_coarse_sampled,
+                                                                                                          xyz_NDC, z_vals, rays_o, rays_d, inv_scale, cos_anneal_ratio,
+                                                                                                          volume_feature, imgs_source, **render_kwargs_train)
     
+                #print(torch.mean(rgb_bg))
                 
                 rgb, depth_pred = torch.clamp(rgb.cpu(),0,1.0).numpy(), depth_pred.cpu().numpy()
                 rgb_rays.append(rgb)

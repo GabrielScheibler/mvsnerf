@@ -1212,7 +1212,6 @@ def validate_mesh(base_dir_path, sdf, iter_step, world_space=False, resolution=1
     print('End 3d mesh creation')
 
 def extract_geometry(bound_min, bound_max, resolution, threshold, sdf):
-    print('threshold: {}'.format(threshold))
     u = sdf
     vertices, triangles = mcubes.marching_cubes(u, threshold)
     b_max_np = bound_max.detach().cpu().numpy()

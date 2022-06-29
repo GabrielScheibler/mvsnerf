@@ -139,7 +139,7 @@ class MVSSystem(LightningModule):
                 rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, near_fars.squeeze()[-1], args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
 
 
-        rgb, disp, acc, depth_pred, alpha, ret, _, _, sdf_gradient_error = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
+        rgb, disp, acc, depth_pred, alpha, ret, rgb_fg, rgb_bg, sdf_gradient_error = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
                                                        volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)
 
         #print("outside_rendering: ", torch.var(rgb,dim=1).mean())
@@ -194,6 +194,8 @@ class MVSSystem(LightningModule):
             else:
                 self.ema = 0.99 * self.ema + 0.01 * img_loss.item()
             self.log('train/ema', self.ema, prog_bar=True)
+            # self.log('train/rgb_fg', torch.mean(rgb_fg), prog_bar=True)
+            # self.log('train/rgb_bg', torch.mean(rgb_bg), prog_bar=True)
 
         if self.global_step % 20000==19999:
             self.save_ckpt(f'{self.global_step}')

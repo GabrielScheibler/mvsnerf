@@ -184,6 +184,8 @@ class MVSSystem(LightningModule):
             psnr0 = mse2psnr2(img_loss0.item())
             self.log('train/PSNR0', psnr0.item(), prog_bar=True)
 
+        if 'inv_s' in extras:
+            self.log('train/inv_s', extras['inv_s'].item(), prog_bar=False)
 
         ##################  rendering #####################
         if self.args.with_rgb_loss:
