@@ -1024,6 +1024,9 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target
     background_alpha = None
     background_sampled_color = None
 
+    inv_s = sdf_network.nerf.nerf_fg.deviation_network.forward(torch.ones([1]).cuda())
+    base_inv_s = inv_s // 2
+
     # Up sample
     if n_importance > 0:
         with torch.no_grad():
@@ -1053,7 +1056,7 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target
                                             z_vals,
                                             sdf,
                                             n_importance // up_sample_steps,
-                                            64 * 2**i,
+                                            base_inv_s * 2**i,
                                             pts)
 
                 new_pts_world = rays_o[:, None, :] + rays_d[:, None, :] * new_z_vals[..., :, None]
