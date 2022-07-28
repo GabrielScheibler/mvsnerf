@@ -135,7 +135,7 @@ def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, white_bkgd=Fa
     rgb_bg = raw_bg[..., :3] # [N_rays, N_samples, 3]
 
     rgb_map = torch.sum(weights_fg[..., None] * rgb_fg, -2) + torch.sum(weights_bg[..., None] * rgb_bg, -2) # [N_rays, 3]
-    depth_map = torch.sum(weights_fg * z_vals, -1) + torch.sum(weights_bg * z_vals, -1) / (torch.sum(weights_fg, -1)+torch.sum(weights_bg, -1))
+    depth_map = torch.sum(weights_fg * z_vals, -1) + torch.sum(weights_bg * z_vals, -1) / (torch.sum(weights_fg, -1) + torch.sum(weights_bg, -1) + 1e-10)
 
     disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map, device=device), depth_map)
     acc_map = torch.sum(weights_fg, -1) + torch.sum(weights_bg, -1)
