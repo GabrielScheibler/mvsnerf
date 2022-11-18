@@ -74,6 +74,12 @@ class MVSDatasetDTU(Dataset):
                 for _ in range(num_viewpoint):
                     ref_view = int(f.readline().rstrip())
                     src_views = [int(x) for x in f.readline().rstrip().split()[1::2]]
+
+                    #use random views as inputs instead of using nearest views to the reference view
+                    # rand = np.random.rand(*np.asarray(src_views).shape)
+                    # src_views = np.floor(rand * num_viewpoint).astype(int)
+                    # src_views = src_views.tolist()
+
                     for light_idx in light_idxs:
                         self.metas += [(scan, light_idx, ref_view, src_views)]
                         self.id_list.append([ref_view] + src_views)
@@ -209,10 +215,10 @@ class MVSDatasetDTU(Dataset):
         if self.split == 'train':
             ids = torch.randperm(5)[:3]
             view_ids = [src_views[i] for i in ids] + [target_view]
-            random_rot = np.eye(4)
+            #random_rot = np.eye(4)
         else:
             view_ids = [src_views[i] for i in range(3)] + [target_view]
-            random_rot = self.get_random_rotation_matrix(axis=1)
+            #random_rot = self.get_random_rotation_matrix(axis=1)
 
         affine_mat, affine_mat_inv = [], []
         imgs, depths_h = [], []

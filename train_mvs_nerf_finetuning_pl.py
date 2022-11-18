@@ -80,7 +80,11 @@ class MVSSystem(LightningModule):
             intrinsic[:2] /= 4
             vox_pts = get_ptsvolume(H-2*args.pad,W-2*args.pad,D, args.pad,  self.near_far_source, intrinsic, c2w)
 
-            self.color_feature = build_color_volume(vox_pts, self.pose_source, self.imgs, with_mask=True).view(D,H,W,-1).unsqueeze(0).permute(0, 4, 1, 2, 3)  # [N,D,H,W,C]
+            depth_input = None
+            if args.use_depth_map:
+                depth_input =  self.pose_source['depths']
+
+            self.color_feature = build_color_volume(vox_pts, self.pose_source, self.imgs, with_mask=True, depth_map=depth_input).view(D,H,W,-1).unsqueeze(0).permute(0, 4, 1, 2, 3)  # [N,D,H,W,C]
             if args.use_color_volume:
                 volume_feature = torch.cat((volume_feature, self.color_feature),dim=1) # [N,C,D,H,W]
 
@@ -171,7 +175,7 @@ class MVSSystem(LightningModule):
 
 
         rgbs, disp, acc, depth_pred, alpha, extras, _, _, sdf_gradient_error = rendering(args, self.pose_source, xyz_coarse_sampled, xyz_NDC, z_vals, rays_o, rays_d, inv_scale, self.get_cos_anneal_ratio(),
-                                                       self.volume, self.imgs, img_feat=None,  **self.render_kwargs_train)
+                                                       self.volume, self.imgs, img_feat=None, depth_map=None, **self.render_kwargs_train)
 
         # rendering
         # rgbs, disp, acc, depth_pred, alpha, extras = rendering(args, self.pose_source, xyz_coarse_sampled, xyz_NDC, z_vals, rays_o, rays_d,
@@ -251,7 +255,7 @@ class MVSSystem(LightningModule):
 
 
                 rgb, disp, acc, depth_pred, alpha, extras, rgb_fg, rgb_bg, sdf_gradients = rendering(args, self.pose_source, xyz_coarse_sampled, xyz_NDC, z_vals, rays_o, rays_d, inv_scale, self.get_cos_anneal_ratio(),
-                                                            self.volume, self.imgs, img_feat=None,  **self.render_kwargs_train)
+                                                            self.volume, self.imgs, img_feat=None, depth_map=None, **self.render_kwargs_train)
 
                 # rendering
                 # rgb, disp, acc, depth_pred, alpha, extras = rendering(args, self.pose_source, xyz_coarse_sampled,
@@ -294,7 +298,8 @@ class MVSSystem(LightningModule):
 
     def validation_epoch_end(self, outputs):
 
-        if self.args.with_depth:
+        #TODO what is breaking here? fix it, because this part is needed for evaluation.
+        if self.args.with_depth and False:
             mean_psnr = torch.stack([x['val_psnr'] for x in outputs]).mean()
             mask_sum = torch.stack([x['mask_sum'] for x in outputs]).sum()
             # mean_d_loss_l = torch.stack([x['val_depth_loss_l'] for x in outputs]).mean()

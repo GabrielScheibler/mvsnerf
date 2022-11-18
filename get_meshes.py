@@ -72,9 +72,10 @@ depth_acc = {}
 eval_metric = [0.1,0.05,0.01]
 depth_acc[f'abs_err'],depth_acc[f'acc_l_{eval_metric[0]}'],depth_acc[f'acc_l_{eval_metric[1]}'],depth_acc[f'acc_l_{eval_metric[2]}'] = {},{},{},{}
 
+use_alpha = True
 create_mesh = True
 is_finetuned = False
-scene = 1
+scene = 114
 
 enum = enumerate([1,8,21,103,114])
 enum = enumerate([114])
@@ -151,6 +152,7 @@ for i_scene, scene in enum:#,8,21,103,114
                 pair_idx = [dataset_train.img_idx[item] for item in pair_idx]
                 
                 imgs_source, proj_mats, near_far_source, pose_source = dataset_train.read_source_views(pair_idx=pair_idx,device=device)
+                depthmaps = pose_source['depths'].unsqueeze(0)
                 volume_feature, _, _ = MVSNet(imgs_source, proj_mats, near_far_source, pad=pad)
                 imgs_source = unpreprocess(imgs_source)
 
@@ -165,7 +167,6 @@ for i_scene, scene in enum:#,8,21,103,114
                 near = -1
                 far = 1
                 resolution = 200
-                use_alpha = False
 
                 if not 'neus' in args.net_type:
                     use_alpha = True
@@ -187,18 +188,22 @@ for i_scene, scene in enum:#,8,21,103,114
                                                 near=near_far_source[0], far=near_far_source[1], pad=pad*args.imgScale_test)
                 cos_anneal_ratio = 1.0
 
+                depth_map_input = None
+                if args.with_depth_map:
+                    depth_map_input = depthmaps
+
                 if use_alpha:
                     # rendering
                     rgb, disp, acc, depth_pred, alpha, extras, _, _, _ = rendering(args, pose_source, xyz_coarse_sampled,
                                                                             xyz_NDC, z_vals, rays_o, rays_d, inv_scale, cos_anneal_ratio,
-                                                                            volume_feature,imgs_source, **render_kwargs_train)
+                                                                            volume_feature,imgs_source,depth_map=depth_map_input, **render_kwargs_train)
                     sdf = 1 - alpha
 
                 else:
                      # rendering
                     sdf = mesh_rendering(args, pose_source, xyz_coarse_sampled,
                                             xyz_NDC, inv_scale,
-                                            volume_feature, imgs_source, **render_kwargs_train)
+                                            volume_feature, imgs_source, depth_map=depth_map_input, **render_kwargs_train)
 
                 
                 pts_norm = torch.linalg.norm(pts, ord=2, dim=-1)

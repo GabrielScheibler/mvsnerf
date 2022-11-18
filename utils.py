@@ -339,12 +339,11 @@ def build_rays_test(H,W, tgt_to_world, world_to_ref, intrinsic, near_fars_ref, n
     return ray_coordinate_world, ray_dir_world,ray_coordinate_ref, depth_candidates, rays_os, ndc_parameters
 
 
-def build_color_volume(point_samples, pose_ref, imgs, img_feat=None, downscale=1.0, with_mask=False):
+def build_color_volume(point_samples, pose_ref, imgs, img_feat=None, downscale=1.0, with_mask=False, depth_map=None):
     '''
     point_world: [N_ray N_sample 3]
     imgs: [N V 3 H W]
     '''
-
     device = imgs.device
     N, V, C, H, W = imgs.shape
     inv_scale = torch.tensor([W - 1, H - 1]).to(device)
@@ -363,10 +362,19 @@ def build_color_volume(point_samples, pose_ref, imgs, img_feat=None, downscale=1
         if img_feat is not None:
             data = torch.cat((data,F.grid_sample(img_feat[:,idx], grid, align_corners=True, mode='bilinear', padding_mode='zeros')),dim=1)
 
+        #depth_map = imgs[:,:,0]
+
         if with_mask:
-            in_mask = ((grid >-1.0)*(grid < 1.0))
-            in_mask = (in_mask[...,0]*in_mask[...,1]).float()
-            data = torch.cat((data,in_mask.unsqueeze(1)), dim=1)
+            if depth_map is None:
+                in_mask = ((grid >-1.0)*(grid < 1.0))
+                in_mask = (in_mask[...,0]*in_mask[...,1]).float()
+                data = torch.cat((data,in_mask.unsqueeze(1)), dim=1)
+            else:
+                depth_map = depth_map.squeeze(2).unsqueeze(2)
+                in_mask = F.grid_sample(depth_map[:, idx], grid, align_corners=True, mode='bilinear', padding_mode='border')
+                in_mask = in_mask > 0
+                data = torch.cat((data,in_mask), dim=1)
+
 
         colors[...,i*C:i*C+C] = data[0].permute(1, 2, 0)
         del grid, point_samples_pixel, data
@@ -936,7 +944,7 @@ def print_frustum(pose_ref, inv_scale, ref_idx=0):
     print(frustum_corners_world)
     return
 
-def gen_pts_feats_no_ndc(imgs, volume_feature, rays_pts, pose_ref, feat_dim, img_feat=None, img_downscale=1.0, use_color_volume=False, net_type='v0', ref_idx=0, pad=0):
+def gen_pts_feats_no_ndc(imgs, volume_feature, rays_pts, pose_ref, feat_dim, img_feat=None, img_downscale=1.0, use_color_volume=False, net_type='v0', ref_idx=0, pad=0, depth_map=None):
 
     rays_ndc = get_ndc_points(pose_ref, rays_pts, imgs, ref_idx=ref_idx, pad=pad)
 
@@ -948,7 +956,7 @@ def gen_pts_feats_no_ndc(imgs, volume_feature, rays_pts, pose_ref, feat_dim, img
         input_feat = torch.empty((N_rays, N_samples, feat_dim), device=imgs.device, dtype=torch.float)
         ray_feats = index_point_feature(volume_feature, rays_ndc) if torch.is_tensor(volume_feature) else volume_feature(rays_ndc)
         input_feat[..., :8] = ray_feats
-        input_feat[..., 8:] = build_color_volume(rays_pts, pose_ref, imgs, img_feat, with_mask=True, downscale=img_downscale)
+        input_feat[..., 8:] = build_color_volume(rays_pts, pose_ref, imgs, img_feat, with_mask=True, downscale=img_downscale, depth_map=depth_map)
     else:
         input_feat = index_point_feature(volume_feature, rays_ndc) if torch.is_tensor(volume_feature) else volume_feature(rays_ndc)
 
@@ -975,11 +983,12 @@ def near_far_from_sphere(rays_o, rays_d):
     far = mid + 1.0
     return near, far
 
-def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target, args, perturb, sdf_network, network_query_fn, n_samples=64, n_outside=32, n_importance=32, up_sample_steps=4):
+def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target, args, perturb, sdf_network, network_query_fn, n_samples=64, n_outside=32, n_importance=32, up_sample_steps=4, depth_map=None):
     batch_size, _ = rays_o.shape
     N, V, C, H, W = imgs.shape
     inv_scale = torch.tensor([W-1, H-1]).cuda()
     near, far = near_far_from_sphere(rays_o, rays_d)
+
     if args.frustum_sampling:
         near, far = near_far_target
         n_samples = 64
@@ -1044,7 +1053,8 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target
                                                     use_color_volume=args.use_color_volume,
                                                     net_type=args.net_type,
                                                     ref_idx=0,
-                                                    pad=args.pad)
+                                                    pad=args.pad,
+                                                    depth_map=depth_map)
 
             # input views are not used in sdf -> pass anything as input views
             sdf = network_query_fn(pts, pts, input_feat, sdf_network.sdf).squeeze()
@@ -1070,7 +1080,8 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target
                                                     use_color_volume=args.use_color_volume,
                                                     net_type=args.net_type,
                                                     ref_idx=0,
-                                                    pad=args.pad)
+                                                    pad=args.pad,
+                                                    depth_map=depth_map)
 
                 z_vals, sdf = cat_z_vals(sdf_network,
                                          rays_o,

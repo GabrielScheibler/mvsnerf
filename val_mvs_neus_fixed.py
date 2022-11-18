@@ -143,7 +143,7 @@ for i_scene, scene in enumerate([1,8,21,103,114]):#,
                 # rendering
                 rgb, disp, acc, depth_pred, alpha, extras, _, _, _ = rendering(args, pose_source, xyz_coarse_sampled,
                                                                        xyz_NDC, z_vals, rays_o, rays_d, inv_scale, cos_anneal_ratio,
-                                                                       volume_feature,imgs_source, **render_kwargs_train)
+                                                                       volume_feature,imgs_source, depth_map=None, **render_kwargs_train)
     
                 
                 rgb, depth_pred = torch.clamp(rgb.cpu(),0,1.0).numpy(), depth_pred.cpu().numpy()

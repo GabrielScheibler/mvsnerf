@@ -168,7 +168,7 @@ for i_scene, scene in enum:#,8,21,103,114
 
                 if('neus' in args.net_type and args.neus_sampling):
                     xyz_coarse_sampled, z_vals, _ = gen_pts_neus(
-                        rays_o, rays_d, imgs_source, volume_feature, pose_source, near_far_source, args, False, render_kwargs_train["network_fn"], render_kwargs_train["network_query_fn"])
+                        rays_o, rays_d, imgs_source, volume_feature, pose_source, near_far_source, args, False, render_kwargs_train["network_fn"], render_kwargs_train["network_query_fn"], depth_map=depth)
 
 
 
@@ -184,7 +184,7 @@ for i_scene, scene in enum:#,8,21,103,114
                 # rendering
                 rgb, disp, acc, depth_pred, alpha, extras, rgb_fg, rgb_bg, sdf_gradient_error = rendering(args, pose_source, xyz_coarse_sampled,
                                                                                                           xyz_NDC, z_vals, rays_o, rays_d, inv_scale, cos_anneal_ratio,
-                                                                                                          volume_feature, imgs_source, **render_kwargs_train)
+                                                                                                          volume_feature, imgs_source, depth_map=None, **render_kwargs_train)
     
                 #print(torch.mean(rgb_bg))
                 

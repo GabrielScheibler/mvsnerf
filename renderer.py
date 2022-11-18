@@ -208,7 +208,7 @@ def gen_dir_feature(w2c_ref, rays_dir):
     dirs = rays_dir @ w2c_ref[:3,:3].t() # [N_rays, 3]
     return dirs
 
-def gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_ndc, feat_dim, img_feat=None, img_downscale=1.0, use_color_volume=False, net_type='v0'):
+def gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_ndc, feat_dim, img_feat=None, img_downscale=1.0, use_color_volume=False, net_type='v0', depth_map=None):
     N_rays, N_samples = rays_pts.shape[:2]
     if img_feat is not None:
         feat_dim += img_feat.shape[1]*img_feat.shape[2]
@@ -217,13 +217,13 @@ def gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_ndc, feat_dim, 
         input_feat = torch.empty((N_rays, N_samples, feat_dim), device=imgs.device, dtype=torch.float)
         ray_feats = index_point_feature(volume_feature, rays_ndc) if torch.is_tensor(volume_feature) else volume_feature(rays_ndc)
         input_feat[..., :8] = ray_feats
-        input_feat[..., 8:] = build_color_volume(rays_pts, pose_ref, imgs, img_feat, with_mask=True, downscale=img_downscale)
+        input_feat[..., 8:] = build_color_volume(rays_pts, pose_ref, imgs, img_feat, with_mask=True, downscale=img_downscale, depth_map=depth_map)
     else:
         input_feat = index_point_feature(volume_feature, rays_ndc) if torch.is_tensor(volume_feature) else volume_feature(rays_ndc)
     return input_feat
 
 def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, rays_dir, inv_scale, cos_anneal_ratio,
-              volume_feature=None, imgs=None, network_fn=None, img_feat=None, network_query_fn=None, white_bkgd=False, **kwargs):
+              volume_feature=None, imgs=None, depth_map=None, network_fn=None, img_feat=None, network_query_fn=None, white_bkgd=False, **kwargs):
 
     batch_size, n_samples, _ = rays_pts.size()
 
@@ -239,7 +239,7 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
 
     # rays_pts
     input_feat = gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_pts_ndc, args.feat_dim, \
-                               img_feat, args.img_downscale, args.use_color_volume, args.net_type)
+                               img_feat, args.img_downscale, args.use_color_volume, args.net_type, depth_map=depth_map)
 
     # rays_dir_n = rays_dir/cos_angle.unsqueeze(-1)
     # rays_dir_n = rays_dir_n[:, None, :].expand(-1,rays_pts.shape[1],-1)
@@ -272,6 +272,13 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
         rgb_map, disp_map, acc_map, weights, depth_map, alpha = raw2outputs_neus(raw_fg, raw_bg, depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
         rgb_fg, _, _, _, _, _ = raw2outputs_neus(raw_fg, torch.zeros_like(raw_bg), depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
         rgb_bg, _, _, _, _, _ = raw2outputs_neus(torch.zeros_like(raw_fg), raw_bg, depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
+        
+        #debug
+        if(torch.any(torch.isnan(rgb_fg))):
+            raise SystemExit("rgb_fg contained a nan value")
+        if(torch.any(torch.isnan(rgb_bg))):
+            raise SystemExit("rgb_bg contained a nan value")
+
         ret = {'inv_s' : inv_s}
         return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_fg, rgb_bg, sdf_gradient_error
 
@@ -288,11 +295,11 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
     return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_map, rgb_map, torch.ones_like(rays_pts).cuda()
 
 def mesh_rendering(args, pose_ref, rays_pts, rays_pts_ndc, inv_scale,
-              volume_feature=None, imgs=None, network_fn=None, img_feat=None, network_query_fn=None, white_bkgd=False, **kwargs):
+              volume_feature=None, imgs=None, depth_map=None, network_fn=None, img_feat=None, network_query_fn=None, white_bkgd=False, **kwargs):
 
     # rays_pts
     input_feat = gen_pts_feats(imgs, volume_feature, rays_pts, pose_ref, rays_pts_ndc, args.feat_dim, \
-                            img_feat, args.img_downscale, args.use_color_volume, args.net_type)
+                            img_feat, args.img_downscale, args.use_color_volume, args.net_type, depth_map=depth_map)
 
     # rays_ndc = rays_ndc * 2 - 1.0
 

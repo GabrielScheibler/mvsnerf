@@ -94,6 +94,8 @@ def config_parser(cmd=None):
                         help='use neus sampling method to sample only within the view frustum')
     parser.add_argument("--rotate_space", default=False, action='store_true',
                         help='rotated the sdf input space towards the target view')
+    parser.add_argument("--with_depth_map", default=False, action='store_true',
+                        help='use depth map as input in color volume creation')
 
 
 

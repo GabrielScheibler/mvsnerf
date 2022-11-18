@@ -133,14 +133,17 @@ class MVSSystem(LightningModule):
             build_rays(imgs, depths_h, pose_ref, w2cs, c2ws, intrinsics, near_fars, N_rays, N_samples, pad=args.pad)
 
         rays_o = rays_o.permute(1,0)
+        depth_map_input = None
+        if self.args.with_depth_map:
+            depth_map_input = depths_h[:, :-1]
 
         if('neus' in self.args.net_type and args.neus_sampling):
             rays_pts, depth_candidates, rays_NDC = gen_pts_neus(
-                rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, near_fars.squeeze()[-1], args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
+                rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, near_fars.squeeze()[-1], args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"], depth_map=depth_map_input)
 
 
         rgb, disp, acc, depth_pred, alpha, ret, rgb_fg, rgb_bg, sdf_gradient_error = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
-                                                       volume_feature, imgs[:, :-1], img_feat=None,  **self.render_kwargs_train)
+                                                       volume_feature, imgs[:, :-1], img_feat=None, depth_map=depth_map_input, **self.render_kwargs_train)
 
         #print("outside_rendering: ", torch.var(rgb,dim=1).mean())
 
@@ -179,9 +182,11 @@ class MVSSystem(LightningModule):
             self.log('train/inv_s', ret['inv_s'].item(), prog_bar=False)
 
         if args.with_depth:
-            psnr = mse2psnr(img2mse(rgb.cpu()[mask], target_s.cpu()[mask]))
+            psnr = mse2psnr2(img_loss.item())
             psnr_out = mse2psnr(img2mse(rgb.cpu()[~mask], target_s.cpu()[~mask]))
             self.log('train/PSNR_out', psnr_out.item(), prog_bar=False)
+            psnr_in = mse2psnr(img2mse(rgb.cpu()[mask], target_s.cpu()[mask]))
+            self.log('train/PSNR_in', psnr_in.item(), prog_bar=False)
         else:
             psnr = mse2psnr2(img_loss.item())
 
@@ -194,8 +199,9 @@ class MVSSystem(LightningModule):
             else:
                 self.ema = 0.99 * self.ema + 0.01 * img_loss.item()
             self.log('train/ema', self.ema, prog_bar=True)
-            # self.log('train/rgb_fg', torch.mean(rgb_fg), prog_bar=True)
-            # self.log('train/rgb_bg', torch.mean(rgb_bg), prog_bar=True)
+            #debug log
+            self.log('train/rgb_fg', torch.mean(rgb_fg), prog_bar=True)
+            self.log('train/rgb_bg', torch.mean(rgb_bg), prog_bar=True)
 
         if self.global_step % 20000==19999:
             self.save_ckpt(f'{self.global_step}')
@@ -238,13 +244,16 @@ class MVSSystem(LightningModule):
                 rays_pts, rays_dir, rays_NDC, depth_candidates, rays_o, ndc_parameters = \
                     build_rays_test(H, W, tgt_to_world, world_to_ref, intrinsic, near_fars, near_fars[-1], args.N_samples, pad=args.pad, chunk=args.chunk, idx=chunk_idx)
 
-                if('neus' in self.args.net_type and args.neus_sampling):
-                    rays_pts, depth_candidates, rays_NDC = gen_pts_neus(rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, near_fars[-1], args, False, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"])
+                depth_map_input = None
+                if self.args.with_depth_map:
+                    depth_map_input = depths_h[:, :-1]
 
+                if('neus' in self.args.net_type and args.neus_sampling):
+                    rays_pts, depth_candidates, rays_NDC = gen_pts_neus(rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, near_fars[-1], args, False, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"], depth_map=depth_map_input)
 
                 # rendering
                 rgb, disp, acc, depth_pred, density_ray, ret, rgb_fg, rgb_bg, sdf_gradients = rendering(args, pose_ref, rays_pts, rays_NDC, depth_candidates, rays_o, rays_dir, inv_scale, self.get_cos_anneal_ratio(),
-                                                       volume_feature, imgs[:, :-1], img_feat=None, **self.render_kwargs_train)
+                                                       volume_feature, imgs[:, :-1], img_feat=None, depth_map=depth_map_input, **self.render_kwargs_train)
                 #print("outside_rendering: ", torch.var(rgb,dim=1).mean())
                 # print_frustum(pose_ref,inv_scale,ref_idx=0)
                 in_sphere = torch.sum(rays_pts * rays_pts, dim=-1) <= 1
@@ -263,7 +272,9 @@ class MVSSystem(LightningModule):
             if self.args.with_depth:
                 depth_gt_render = depths_h[0, -1].cpu()
                 mask = depth_gt_render > 0
-                log['val_psnr'] = mse2psnr(torch.mean(img_err_abs[:,mask] ** 2))
+                log['val_psnr_in'] = mse2psnr(torch.mean(img_err_abs[:,mask] ** 2))
+                log['val_psnr_out'] = mse2psnr(torch.mean(img_err_abs[:,~mask] ** 2))
+                log['val_psnr'] = mse2psnr(torch.mean(img_err_abs**2))
             else:
                 log['val_psnr'] = mse2psnr(torch.mean(img_err_abs**2))
 
