@@ -977,8 +977,8 @@ def get_ndc_points(pose_ref, rays_pts, imgs, ref_idx=0, pad=0):
 
 def near_far_from_sphere(rays_o, rays_d):
     a = torch.sum(rays_d**2, dim=-1, keepdim=True)
-    b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
-    mid = 0.5 * (-b) / a
+    b = torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
+    mid = (-b) / a
     near = mid - 1.0
     far = mid + 1.0
     return near, far
@@ -1097,6 +1097,11 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target
                 pts_world = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]
                 pts = world_to_sdf_input_space(pose_ref, pts_world, args, inv_scale)
                 pts_ndc = get_ndc_points(pose_ref, pts_world, imgs, ref_idx=0, pad=args.pad)
+
+                #debug print
+                # norms = torch.sum(pts_world**2, dim=2)
+                # print("min_norm: ",torch.min(norms))
+                # print("max_norm: ",torch.max(norms))
 
     # Background model
     if n_outside > 0:

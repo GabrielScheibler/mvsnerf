@@ -112,7 +112,7 @@ def raw2outputs(raw, z_vals, dists, white_bkgd=False, net_type='v2'):
         rgb_map = rgb_map + (1. - acc_map[..., None])
     return rgb_map, disp_map, acc_map, weights, depth_map, alpha
 
-def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, white_bkgd=False, net_type='v2'):
+def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, near_background, white_bkgd=False, net_type='v2'):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -140,9 +140,17 @@ def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, white_bkgd=Fa
     disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map, device=device), depth_map)
     acc_map = torch.sum(weights_fg, -1) + torch.sum(weights_bg, -1)
 
+    weights_bg1 = weights
+    weights_bg1[torch.logical_or(inside_sphere, near_background)] = 0
+    weights_bg1 = torch.sum(weights_bg1, dim=1)
+    weights_fg1 = weights
+    weights_fg1[torch.logical_not(torch.logical_or(inside_sphere, near_background))] = 0
+    weights_fg1 = torch.sum(weights_fg1, dim=1)
+    mask_fg = weights_fg1 > weights_bg1
+
     if white_bkgd:
         rgb_map = rgb_map + (1. - acc_map[..., None])
-    return rgb_map, disp_map, acc_map, weights, depth_map, alpha
+    return rgb_map, disp_map, acc_map, weights, depth_map, alpha, mask_fg
 
 def transform_raw_neus(raw, pts, dirs, cos_anneal_ratio):
     # Section length
@@ -258,6 +266,9 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
 
         pts_norm = torch.linalg.norm(rays_pts, ord=2, dim=-1)
         inside_sphere = (pts_norm < 1.0).float().detach()
+        #TODO define outside foreground points
+        nis = 1 - inside_sphere
+        near_background = torch.cumprod(nis, dim=-1)
 
         raw_bg = network_query_fn(rays_pts_ndc, angle, input_feat, network_fn.forward_bg)
         raw_fg_alpha = network_query_fn(input_pts, input_dir, input_feat, network_fn.forward_fg)
@@ -269,9 +280,9 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
 
         dists = depth2dist(depth_candidates, cos_angle)
         # dists = ndc2dist(rays_ndc)
-        rgb_map, disp_map, acc_map, weights, depth_map, alpha = raw2outputs_neus(raw_fg, raw_bg, depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
-        rgb_fg, _, _, _, _, _ = raw2outputs_neus(raw_fg, torch.zeros_like(raw_bg), depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
-        rgb_bg, _, _, _, _, _ = raw2outputs_neus(torch.zeros_like(raw_fg), raw_bg, depth_candidates, dists, inside_sphere, white_bkgd, args.net_type)
+        rgb_map, disp_map, acc_map, weights, depth_map, alpha, mask_fg = raw2outputs_neus(raw_fg, raw_bg, depth_candidates, dists, inside_sphere, near_background, white_bkgd, args.net_type)
+        rgb_fg, _, _, _, _, _, _ = raw2outputs_neus(raw_fg, torch.zeros_like(raw_bg), depth_candidates, dists, inside_sphere, near_background, white_bkgd, args.net_type)
+        rgb_bg, _, _, _, _, _, _ = raw2outputs_neus(torch.zeros_like(raw_fg), raw_bg, depth_candidates, dists, inside_sphere, near_background, white_bkgd, args.net_type)
         
         #debug
         if(torch.any(torch.isnan(rgb_fg))):
@@ -279,7 +290,7 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
         if(torch.any(torch.isnan(rgb_bg))):
             raise SystemExit("rgb_bg contained a nan value")
 
-        ret = {'inv_s' : inv_s}
+        ret = {'inv_s' : inv_s, 'mask_fg' : mask_fg}
         return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_fg, rgb_bg, sdf_gradient_error
 
 

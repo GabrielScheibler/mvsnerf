@@ -96,6 +96,8 @@ def config_parser(cmd=None):
                         help='rotated the sdf input space towards the target view')
     parser.add_argument("--with_depth_map", default=False, action='store_true',
                         help='use depth map as input in color volume creation')
+    parser.add_argument("--with_mask_loss", default=False, action='store_true',
+                        help='use mask loss to regularize foreground and background neus models')
 
 
 

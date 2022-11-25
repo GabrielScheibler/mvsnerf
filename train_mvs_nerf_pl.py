@@ -163,9 +163,16 @@ class MVSSystem(LightningModule):
             abs_err = abs_error(depth_pred, rays_depth, mask).mean()
             self.log('train/abs_err', abs_err, prog_bar=True)
 
+            if self.args.with_mask_loss and 'mask_fg' in ret:
+                mask_loss = torch.sum((mask.type(torch.DoubleTensor) - ret['mask_fg'].type(torch.DoubleTensor))**2)
+                self.log('train/mask_loss', mask_loss.item(), prog_bar=False)
+                loss += mask_loss * 0.1
+
         ##################  rendering #####################
         img_loss = img2mse(rgb, target_s)
         loss = loss + img_loss
+
+
 
         if('neus' in self.args.net_type and not args.no_eikonal):
             eikonal_loss = sdf_gradient_error
