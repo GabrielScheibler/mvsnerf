@@ -164,9 +164,10 @@ class MVSSystem(LightningModule):
             self.log('train/abs_err', abs_err, prog_bar=True)
 
             if self.args.with_mask_loss and 'mask_fg' in ret:
-                mask_loss = torch.sum((mask.type(torch.DoubleTensor) - ret['mask_fg'].type(torch.DoubleTensor))**2)
-                self.log('train/mask_loss', mask_loss.item(), prog_bar=False)
-                loss += mask_loss * 0.1
+                mask_loss = torch.mean((mask.type(torch.DoubleTensor).detach().to(device) - ret['mask_fg'])**2)
+                mask_loss *= 1
+                self.log('train/mask_loss', mask_loss.item(), prog_bar=True)
+                loss += mask_loss
 
         ##################  rendering #####################
         img_loss = img2mse(rgb, target_s)
@@ -176,7 +177,7 @@ class MVSSystem(LightningModule):
 
         if('neus' in self.args.net_type and not args.no_eikonal):
             eikonal_loss = sdf_gradient_error
-            self.log('train/eikonal_loss', eikonal_loss.item(), prog_bar=True)
+            self.log('train/eikonal_loss', eikonal_loss.item(), prog_bar=False)
             loss += eikonal_loss
 
         if 'rgb0' in ret:

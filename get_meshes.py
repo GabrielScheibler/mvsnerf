@@ -72,12 +72,12 @@ depth_acc = {}
 eval_metric = [0.1,0.05,0.01]
 depth_acc[f'abs_err'],depth_acc[f'acc_l_{eval_metric[0]}'],depth_acc[f'acc_l_{eval_metric[1]}'],depth_acc[f'acc_l_{eval_metric[2]}'] = {},{},{},{}
 
-use_alpha = True
-create_mesh = True
+gen_alpha = True
+gen_sdf = True
 is_finetuned = False
 scene = 114
 
-enum = enumerate([1,8,21,103,114])
+#enum = enumerate([1,8,21,103,114])
 enum = enumerate([114])
 
 if is_finetuned:
@@ -87,7 +87,7 @@ for i_scene, scene in enum:#,8,21,103,114
     psnr,ssim,LPIPS_vgg,rgbs = [],[],[],[]
     cmd = f'--datadir /abyss/home/data/mvsnerf_dtu/mvs_training/dtu/scan{scene}  \
      --dataset_name dtu_ft  \
-     --net_type neus --ckpt ./ckpts//latest.tar '
+     --net_type neus --ckpt ./ckpts//latest.tar --with_depth --with_depth_map'
 
     args = config_parser(cmd.split())
     args.use_viewdirs = True
@@ -136,76 +136,90 @@ for i_scene, scene in enum:#,8,21,103,114
         except Exception:     
             pass
 
-        if create_mesh:
-            for i, batch in enumerate(tqdm(dataset_val)):
-                torch.cuda.empty_cache()
-                
-                rays, img = decode_batch(batch)
-                rays = rays.squeeze().to(device)  # (H*W, 3)
-                img = img.squeeze().cpu().numpy()  # (H, W, 3)
-                depth = batch['depth'].squeeze().numpy()  # (H, W)
+        for i, batch in enumerate(tqdm(dataset_val)):
+            torch.cuda.empty_cache()
             
-                # find nearest image idx from training views
-                positions = dataset_train.poses[:,:3,3]
-                dis = np.sum(np.abs(positions - dataset_val.poses[[i],:3,3]), axis=-1)
-                pair_idx = np.argsort(dis)[:3]
-                pair_idx = [dataset_train.img_idx[item] for item in pair_idx]
-                
-                imgs_source, proj_mats, near_far_source, pose_source = dataset_train.read_source_views(pair_idx=pair_idx,device=device)
-                depthmaps = pose_source['depths'].unsqueeze(0)
-                volume_feature, _, _ = MVSNet(imgs_source, proj_mats, near_far_source, pad=pad)
+            rays, img = decode_batch(batch)
+            rays = rays.squeeze().to(device)  # (H*W, 3)
+            img = img.squeeze().cpu().numpy()  # (H, W, 3)
+            depth = batch['depth'].squeeze().numpy()  # (H, W)
+        
+            # find nearest image idx from training views
+            positions = dataset_train.poses[:,:3,3]
+            dis = np.sum(np.abs(positions - dataset_val.poses[[i],:3,3]), axis=-1)
+            pair_idx = np.argsort(dis)[:3]
+            pair_idx = [dataset_train.img_idx[item] for item in pair_idx]
+            
+            imgs_source, proj_mats, near_far_source, pose_source = dataset_train.read_source_views(pair_idx=pair_idx,device=device)
+            depthmaps = pose_source['depths'].unsqueeze(0)
+            volume_feature, _, _ = MVSNet(imgs_source, proj_mats, near_far_source, pad=pad)
+            imgs_source = unpreprocess(imgs_source)
+
+            if is_finetuned:   
+                imgs_source, proj_mats, near_far_source, pose_source = dataset_train.read_source_views(device=device)
                 imgs_source = unpreprocess(imgs_source)
+                volume_feature = torch.load(args.ckpt)['volume']['feat_volume']
+                volume_feature = RefVolume(volume_feature.detach()).cuda()
+                pad = 24
 
-                if is_finetuned:   
-                    imgs_source, proj_mats, near_far_source, pose_source = dataset_train.read_source_views(device=device)
-                    imgs_source = unpreprocess(imgs_source)
-                    volume_feature = torch.load(args.ckpt)['volume']['feat_volume']
-                    volume_feature = RefVolume(volume_feature.detach()).cuda()
-                    pad = 24
+            # create 3D mesh
+            near = -1
+            far = 1
+            resolution = 200
 
-                # create 3D mesh
-                near = -1
-                far = 1
-                resolution = 200
+            pts, rays_o, rays_d, z_vals = point_grid([near,near,near],[far,far,far],resolution)
+            pts, rays_o, rays_d, z_vals = pts.to(device), rays_o.to(device), rays_d.to(device), z_vals.to(device)
+            xyz_coarse_sampled = pts
 
-                if not 'neus' in args.net_type:
-                    use_alpha = True
+            # Converting world coordinate to ndc coordinate
+            H, W = img.shape[:2]
+            inv_scale = torch.tensor([W - 1, H - 1]).to(device)
+            w2c_ref, intrinsic_ref = pose_source['w2cs'][0], pose_source['intrinsics'][0].clone()
+            xyz_NDC = get_ndc_coordinate(w2c_ref, intrinsic_ref, xyz_coarse_sampled, inv_scale,
+                                            near=near_far_source[0], far=near_far_source[1], pad=pad*args.imgScale_test)
+            cos_anneal_ratio = 1.0
 
-                if use_alpha:   
-                    threshold = [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]
-                else:
-                    threshold = [0]
+            depth_map_input = None
+            if args.with_depth_map:
+                depth_map_input = depthmaps
 
-                pts, rays_o, rays_d, z_vals = point_grid([near,near,near],[far,far,far],resolution)
-                pts, rays_o, rays_d, z_vals = pts.to(device), rays_o.to(device), rays_d.to(device), z_vals.to(device)
-                xyz_coarse_sampled = pts
+            if gen_alpha:
+                print("\ngenerate models via alpha method:")
 
-                # Converting world coordinate to ndc coordinate
-                H, W = img.shape[:2]
-                inv_scale = torch.tensor([W - 1, H - 1]).to(device)
-                w2c_ref, intrinsic_ref = pose_source['w2cs'][0], pose_source['intrinsics'][0].clone()
-                xyz_NDC = get_ndc_coordinate(w2c_ref, intrinsic_ref, xyz_coarse_sampled, inv_scale,
-                                                near=near_far_source[0], far=near_far_source[1], pad=pad*args.imgScale_test)
-                cos_anneal_ratio = 1.0
-
-                depth_map_input = None
-                if args.with_depth_map:
-                    depth_map_input = depthmaps
-
-                if use_alpha:
-                    # rendering
-                    rgb, disp, acc, depth_pred, alpha, extras, _, _, _ = rendering(args, pose_source, xyz_coarse_sampled,
-                                                                            xyz_NDC, z_vals, rays_o, rays_d, inv_scale, cos_anneal_ratio,
-                                                                            volume_feature,imgs_source,depth_map=depth_map_input, **render_kwargs_train)
-                    sdf = 1 - alpha
-
-                else:
-                     # rendering
-                    sdf = mesh_rendering(args, pose_source, xyz_coarse_sampled,
-                                            xyz_NDC, inv_scale,
-                                            volume_feature, imgs_source, depth_map=depth_map_input, **render_kwargs_train)
-
+                # rendering
+                rgb, disp, acc, depth_pred, alpha, extras, _, _, _ = rendering(args, pose_source, xyz_coarse_sampled,
+                                                                        xyz_NDC, z_vals, rays_o, rays_d, inv_scale, cos_anneal_ratio,
+                                                                        volume_feature,imgs_source,depth_map=depth_map_input, **render_kwargs_train)
+                #sdf = 1 - alpha
                 
+                pts_norm = torch.linalg.norm(pts, ord=2, dim=-1)
+                outside_sphere = (pts_norm > 1.0).bool()
+
+                # outside_frame, _ = torch.max(xyz_NDC,dim=-1)
+                # outside_frame = outside_frame > 1
+
+                alpha[outside_sphere] = 0.0
+
+                threshold = [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]
+
+                alpha = alpha.reshape([resolution,resolution,resolution])
+                alpha = alpha.cpu().detach().numpy()
+                for th in threshold:
+                    print("threshhold: ",th)
+                    print("inside ratio: ",np.sum(alpha>th) / np.sum(np.ones_like(alpha)))
+                    validate_mesh(save_dir, 1-alpha, i_scene*10**4 + i*10**6 + 0*10**3 + round(th*10**2), world_space=False,
+                                resolution=resolution, threshold=1-th)
+                #3D mesh done
+                print("done generating models via alpha method\n")
+
+            if 'neus' in args.net_type and gen_sdf:
+                print("\ngenerate models via sdf method:")
+
+                # rendering
+                sdf = mesh_rendering(args, pose_source, xyz_coarse_sampled,
+                                        xyz_NDC, inv_scale,
+                                        volume_feature, imgs_source, depth_map=depth_map_input, **render_kwargs_train)
+
                 pts_norm = torch.linalg.norm(pts, ord=2, dim=-1)
                 outside_sphere = (pts_norm > 1.0).bool()
 
@@ -214,17 +228,18 @@ for i_scene, scene in enum:#,8,21,103,114
 
                 sdf[outside_sphere] = 1.0
 
+                threshold = threshold = [0.0]
+
                 sdf = sdf.reshape([resolution,resolution,resolution])
                 sdf = sdf.cpu().detach().numpy()
                 for th in threshold:
-                    thh = th
-                    print("threshhold: ",thh)
-                    if use_alpha:
-                        th = 1 - th
+                    print("threshhold: ",th)
                     print("inside ratio: ",np.sum(sdf<th) / np.sum(np.ones_like(sdf)))
-                    validate_mesh(save_dir, sdf, i_scene*1000 + i*1000*1000 + round(thh*100), world_space=False,
+                    validate_mesh(save_dir, sdf, i_scene*10**4 + i*10**6 + 1*10**3 + round(th*10**2), world_space=False,
                                 resolution=resolution, threshold=th)
                 #3D mesh done
-                break
+                print("done generating models via sdf method\n")
 
-        print("all 3D meshes done")
+            break
+
+        print("\nall 3D meshes done")

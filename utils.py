@@ -1228,7 +1228,7 @@ def validate_mesh(base_dir_path, sdf, iter_step, world_space=False, resolution=1
     mesh = trimesh.Trimesh(vertices, triangles)
     mesh.export(os.path.join(base_dir_path, 'meshes', '{:0>8d}.ply'.format(iter_step)))
 
-    print('End 3d mesh creation')
+    print('3d mesh saved to ','{:0>8d}.ply'.format(iter_step))
 
 def extract_geometry(bound_min, bound_max, resolution, threshold, sdf):
     u = sdf

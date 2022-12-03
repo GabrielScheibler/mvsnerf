@@ -140,13 +140,12 @@ def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, near_backgrou
     disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map, device=device), depth_map)
     acc_map = torch.sum(weights_fg, -1) + torch.sum(weights_bg, -1)
 
-    weights_bg1 = weights
-    weights_bg1[torch.logical_or(inside_sphere, near_background)] = 0
-    weights_bg1 = torch.sum(weights_bg1, dim=1)
-    weights_fg1 = weights
-    weights_fg1[torch.logical_not(torch.logical_or(inside_sphere, near_background))] = 0
+    weights_bg1 = weights.masked_fill(torch.logical_or(inside_sphere, near_background),0)
+    weights_fg1 = weights.masked_fill(torch.logical_not(torch.logical_or(inside_sphere, near_background)),0)
     weights_fg1 = torch.sum(weights_fg1, dim=1)
-    mask_fg = weights_fg1 > weights_bg1
+    weights_bg1 = torch.sum(weights_bg1, dim=1)
+    mask_fg = (weights_fg1 - weights_bg1) / (weights_fg1 + weights_bg1 + 1e-10)
+    mask_fg = 0.5 * mask_fg + 0.5
 
     if white_bkgd:
         rgb_map = rgb_map + (1. - acc_map[..., None])
@@ -266,7 +265,6 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
 
         pts_norm = torch.linalg.norm(rays_pts, ord=2, dim=-1)
         inside_sphere = (pts_norm < 1.0).float().detach()
-        #TODO define outside foreground points
         nis = 1 - inside_sphere
         near_background = torch.cumprod(nis, dim=-1)
 
@@ -289,7 +287,8 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
             raise SystemExit("rgb_fg contained a nan value")
         if(torch.any(torch.isnan(rgb_bg))):
             raise SystemExit("rgb_bg contained a nan value")
-
+        
+        
         ret = {'inv_s' : inv_s, 'mask_fg' : mask_fg}
         return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_fg, rgb_bg, sdf_gradient_error
 
