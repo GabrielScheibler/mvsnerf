@@ -98,6 +98,10 @@ def config_parser(cmd=None):
                         help='use depth map as input in color volume creation')
     parser.add_argument("--with_mask_loss", default=False, action='store_true',
                         help='use mask loss to regularize foreground and background neus models')
+    parser.add_argument("--with_acc_loss", default=False, action='store_true',
+                        help='use accuracy loss to encourage larger inv_scale')
+    parser.add_argument("--with_invs_loss", default=False, action='store_true',
+                        help='use inv scale loss to encourage larger inv_scale')
 
 
 

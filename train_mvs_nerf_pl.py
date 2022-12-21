@@ -137,7 +137,7 @@ class MVSSystem(LightningModule):
         if self.args.with_depth_map:
             depth_map_input = depths_h[:, :-1]
 
-        if('neus' in self.args.net_type and args.neus_sampling):
+        if 'neus' in self.args.net_type and args.neus_sampling:
             rays_pts, depth_candidates, rays_NDC = gen_pts_neus(
                 rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, near_fars.squeeze()[-1], args, True, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"], depth_map=depth_map_input)
 
@@ -147,11 +147,12 @@ class MVSSystem(LightningModule):
 
         #print("outside_rendering: ", torch.var(rgb,dim=1).mean())
 
-
         if self.args.with_depth:
             mask = rays_depth > 0
             if self.args.with_depth_loss:
-                loss += self.loss(depth_pred, rays_depth, mask)
+                depth_loss = self.loss(depth_pred, rays_depth, mask)
+                self.log('train/depth_loss', depth_loss.item(), prog_bar=True)
+                loss += depth_loss
 
             self.log(f'train/acc_l_{self.eval_metric[0]}mm', acc_threshold(depth_pred, rays_depth, mask,
                                                                       self.eval_metric[0]).mean(), prog_bar=False)
@@ -161,9 +162,9 @@ class MVSSystem(LightningModule):
                                                                       self.eval_metric[2]).mean(), prog_bar=False)
 
             abs_err = abs_error(depth_pred, rays_depth, mask).mean()
-            self.log('train/abs_err', abs_err, prog_bar=True)
+            self.log('train/abs_err', abs_err, prog_bar=False)
 
-            if self.args.with_mask_loss and 'mask_fg' in ret:
+            if self.args.with_mask_loss and 'neus' in self.args.net_type:
                 mask_loss = torch.mean((mask.type(torch.DoubleTensor).detach().to(device) - ret['mask_fg'])**2)
                 mask_loss *= 1
                 self.log('train/mask_loss', mask_loss.item(), prog_bar=True)
@@ -173,12 +174,29 @@ class MVSSystem(LightningModule):
         img_loss = img2mse(rgb, target_s)
         loss = loss + img_loss
 
+        if 'neus' in self.args.net_type:
+            if self.args.with_acc_loss:
+                acc_loss = 3
+                acc_loss -= acc_threshold(depth_pred, rays_depth, mask, self.eval_metric[0]).mean()
+                acc_loss -= acc_threshold(depth_pred, rays_depth, mask, self.eval_metric[1]).mean()
+                acc_loss -= acc_threshold(depth_pred, rays_depth, mask, self.eval_metric[2]).mean()
+                acc_loss = acc_loss / 3.0
+                acc_loss = acc_loss * 0.05
+                self.log('train/acc_loss', acc_loss.item(), prog_bar=True)
+                loss += acc_loss
 
+            if not args.no_eikonal:
+                eikonal_loss = sdf_gradient_error
+                self.log('train/eikonal_loss', eikonal_loss.item(), prog_bar=True)
+                loss += eikonal_loss
 
-        if('neus' in self.args.net_type and not args.no_eikonal):
-            eikonal_loss = sdf_gradient_error
-            self.log('train/eikonal_loss', eikonal_loss.item(), prog_bar=False)
-            loss += eikonal_loss
+            if self.args.with_invs_loss:
+                invs_loss = 1 / (ret['inv_s'] + 1e-10)
+                invs_loss = invs_loss * 0.05
+                invs_loss = invs_loss * torch.min(torch.FloatTensor([1.0,(self.global_step / 30000)]))
+                self.log('train/invs_loss', invs_loss.item(), prog_bar=True)
+                loss += invs_loss
+
 
         if 'rgb0' in ret:
             img_loss_coarse = img2mse(ret['rgb0'], target_s)
@@ -201,19 +219,18 @@ class MVSSystem(LightningModule):
         with torch.no_grad():
             self.log('train/loss', loss, prog_bar=True)
             self.log('train/img_mse_loss', img_loss.item(), prog_bar=True)
-            self.log('train/PSNR', psnr.item(), prog_bar=True)
+            self.log('train/PSNR', psnr.item(), prog_bar=False)
             if(self.ema == None):
                 self.ema = img_loss.item()
             else:
                 self.ema = 0.99 * self.ema + 0.01 * img_loss.item()
-            self.log('train/ema', self.ema, prog_bar=True)
+            self.log('train/ema', self.ema, prog_bar=False)
             #debug log
-            self.log('train/rgb_fg', torch.mean(rgb_fg), prog_bar=True)
-            self.log('train/rgb_bg', torch.mean(rgb_bg), prog_bar=True)
+            self.log('train/rgb_fg', torch.mean(rgb_fg), prog_bar=False)
+            self.log('train/rgb_bg', torch.mean(rgb_bg), prog_bar=False)
 
         if self.global_step % 20000==19999:
             self.save_ckpt(f'{self.global_step}')
-
 
         return  {'loss':loss}
 
