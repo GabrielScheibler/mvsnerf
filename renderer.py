@@ -274,7 +274,7 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
 
         sdf_gradient_error = (torch.linalg.norm(sdf_gradients, ord=2, dim=-1) - 1.0) ** 2
         sdf_gradient_error = sdf_gradient_error * inside_sphere
-        sdf_gradient_error = sdf_gradient_error.sum() / inside_sphere.sum()
+        sdf_gradient_error = sdf_gradient_error.sum() / (inside_sphere.sum() + 10e-5)
 
         dists = depth2dist(depth_candidates, cos_angle)
         # dists = ndc2dist(rays_ndc)

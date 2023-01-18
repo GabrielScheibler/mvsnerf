@@ -102,6 +102,10 @@ def config_parser(cmd=None):
                         help='use accuracy loss to encourage larger inv_scale')
     parser.add_argument("--with_invs_loss", default=False, action='store_true',
                         help='use inv scale loss to encourage larger inv_scale')
+    parser.add_argument("--squared_mask_loss", default=False, action='store_true',
+                        help='use squared mask_loss if already using mask_loss')
+    parser.add_argument("--with_bgrgb_loss", default=False, action='store_true',
+                        help='use bgrgb_loss to avoid training error resulting in completely black background outputs')
 
 
 

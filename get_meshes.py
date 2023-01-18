@@ -87,7 +87,7 @@ for i_scene, scene in enum:#,8,21,103,114
     psnr,ssim,LPIPS_vgg,rgbs = [],[],[],[]
     cmd = f'--datadir /abyss/home/data/mvsnerf_dtu/mvs_training/dtu/scan{scene}  \
      --dataset_name dtu_ft  \
-     --net_type neus --ckpt ./ckpts//latest.tar --with_depth --with_depth_map'
+     --net_type neus --ckpt ./ckpts//latest.tar --with_depth'
 
     args = config_parser(cmd.split())
     args.use_viewdirs = True

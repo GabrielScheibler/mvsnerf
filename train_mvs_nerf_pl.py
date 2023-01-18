@@ -164,11 +164,15 @@ class MVSSystem(LightningModule):
             abs_err = abs_error(depth_pred, rays_depth, mask).mean()
             self.log('train/abs_err', abs_err, prog_bar=False)
 
-            if self.args.with_mask_loss and 'neus' in self.args.net_type:
+            if 'neus' in self.args.net_type:
                 mask_loss = torch.mean((mask.type(torch.DoubleTensor).detach().to(device) - ret['mask_fg'])**2)
-                mask_loss *= 1
-                self.log('train/mask_loss', mask_loss.item(), prog_bar=True)
-                loss += mask_loss
+                self.log('train/mask_error', mask_loss.item(), prog_bar=False)
+                if self.args.with_mask_loss:
+                    if self.args.squared_mask_loss:
+                        mask_loss = mask_loss * mask_loss * 10
+                    mask_loss *= 1
+                    self.log('train/mask_loss', mask_loss.item(), prog_bar=True)
+                    loss += mask_loss
 
         ##################  rendering #####################
         img_loss = img2mse(rgb, target_s)
@@ -196,6 +200,17 @@ class MVSSystem(LightningModule):
                 invs_loss = invs_loss * torch.min(torch.FloatTensor([1.0,(self.global_step / 30000)]))
                 self.log('train/invs_loss', invs_loss.item(), prog_bar=True)
                 loss += invs_loss
+
+            if self.args.with_bgrgb_loss:
+                rgb_bg_const = 0.01
+                rgb_bg_mean = torch.mean(rgb_bg)
+                rgb_bg_min = torch.minimum(torch.tensor(rgb_bg_const).to(device),rgb_bg_mean)
+                bgrgb_loss = rgb_bg_const - rgb_bg_min
+                bgrgb_loss = bgrgb_loss * 10000
+                bgrgb_loss = bgrgb_loss * (1 - torch.min(torch.FloatTensor([1.0,(self.global_step / 30000)])))
+                self.log('train/bgrgb_loss', bgrgb_loss.item(), prog_bar=False)
+                loss += bgrgb_loss
+
 
 
         if 'rgb0' in ret:
@@ -263,6 +278,7 @@ class MVSSystem(LightningModule):
             volume_feature, img_feat, _ = self.MVSNet(imgs[:, :3], proj_mats[:, :3], near_fars[0], pad=args.pad)
             imgs = self.unpreprocess(imgs)
             rgbs, depth_preds, rgbs_fg, rgbs_bg = [],[],[],[]
+            fg_mask_pred = []
             for chunk_idx in range(H*W//args.chunk + int(H*W%args.chunk>0)):
 
 
@@ -273,7 +289,7 @@ class MVSSystem(LightningModule):
                 if self.args.with_depth_map:
                     depth_map_input = depths_h[:, :-1]
 
-                if('neus' in self.args.net_type and args.neus_sampling):
+                if 'neus' in self.args.net_type and args.neus_sampling:
                     rays_pts, depth_candidates, rays_NDC = gen_pts_neus(rays_o, rays_dir, imgs[:, :-1], volume_feature, pose_ref, near_fars[-1], args, False, self.render_kwargs_train["network_fn"], self.render_kwargs_train["network_query_fn"], depth_map=depth_map_input)
 
                 # rendering
@@ -287,12 +303,16 @@ class MVSSystem(LightningModule):
                 rgbs.append(rgb.cpu());depth_preds.append(depth_pred.cpu())
                 rgbs_fg.append(rgb_fg.cpu())
                 rgbs_bg.append(rgb_bg.cpu())
+                if 'neus' in self.args.net_type:
+                    fg_mask_pred.append(ret['mask_fg'].cpu())
 
             imgs = imgs.cpu()
             rgb, depth_r = torch.clamp(torch.cat(rgbs).reshape(H, W, 3).permute(2,0,1),0,1), torch.cat(depth_preds).reshape(H, W)
             rgb_fg = torch.clamp(torch.cat(rgbs_fg).reshape(H, W, 3).permute(2,0,1),0,1)
             rgb_bg = torch.clamp(torch.cat(rgbs_bg).reshape(H, W, 3).permute(2,0,1),0,1)
             img_err_abs = (rgb - imgs[0,-1]).abs()
+            if 'neus' in self.args.net_type:
+                fg_mask_pred = torch.cat(fg_mask_pred).reshape(H, W)
 
             if self.args.with_depth:
                 depth_gt_render = depths_h[0, -1].cpu()
@@ -320,6 +340,8 @@ class MVSSystem(LightningModule):
                 log[f'val_acc_{self.eval_metric[1]}mm'] = acc_threshold(depth_r, depth_gt_render, mask, self.eval_metric[1]).sum()
                 log[f'val_acc_{self.eval_metric[2]}mm'] = acc_threshold(depth_r, depth_gt_render, mask, self.eval_metric[2]).sum()
                 log['mask_sum'] = mask.float().sum()
+                if 'neus' in self.args.net_type:
+                    log['val_mask_error'] = torch.mean((mask.type(torch.FloatTensor).cpu()-fg_mask_pred)**2)
             else:
                 minmax = [2.0, 6.0]
                 depth_pred_r_, _ = visualize_depth(depth_r, minmax)
@@ -348,6 +370,8 @@ class MVSSystem(LightningModule):
         mean_acc_1mm = torch.stack([x[f'val_acc_{self.eval_metric[0]}mm'] for x in outputs]).sum() / mask_sum
         mean_acc_2mm = torch.stack([x[f'val_acc_{self.eval_metric[1]}mm'] for x in outputs]).sum() / mask_sum
         mean_acc_4mm = torch.stack([x[f'val_acc_{self.eval_metric[2]}mm'] for x in outputs]).sum() / mask_sum
+        if 'neus' in self.args.net_type:
+            mask_error = torch.stack([x['val_mask_error'] for x in outputs]).mean()
 
         self.log('val/d_loss_r', mean_d_loss_r, prog_bar=False)
         self.log('val/PSNR', mean_psnr, prog_bar=False)
@@ -355,6 +379,8 @@ class MVSSystem(LightningModule):
         self.log(f'val/acc_{self.eval_metric[0]}mm', mean_acc_1mm, prog_bar=False)
         self.log(f'val/acc_{self.eval_metric[1]}mm', mean_acc_2mm, prog_bar=False)
         self.log(f'val/acc_{self.eval_metric[2]}mm', mean_acc_4mm, prog_bar=False)
+        if 'neus' in self.args.net_type:
+            self.log(f'val/mask_error', mask_error, prog_bar=False)
 
         return
 

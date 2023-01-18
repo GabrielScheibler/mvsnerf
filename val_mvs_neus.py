@@ -67,6 +67,16 @@ def acc_threshold(abs_err, threshold):
     acc_mask = abs_err < threshold
     return  acc_mask.astype('float') if type(abs_err) is np.ndarray else acc_mask.float()
 
+def mse(x,gt,mask=None):
+    if mask==None:
+        mask = np.ones_like(x)
+    return np.mean((x[mask] - gt[mask])**2)
+
+def mae(x,gt,mask=None):
+    if mask==None:
+        mask = np.ones_like(x)
+    return np.mean(np.abs(x[mask] - gt[mask]))
+
 psnr_all,ssim_all,LPIPS_vgg_all = [],[],[]
 depth_acc = {}
 eval_metric = [0.1,0.05,0.01]
@@ -161,6 +171,7 @@ for i_scene, scene in enum:#,8,21,103,114
         
             N_rays_all = rays.shape[0]
             rgb_rays, depth_rays_preds = [],[]
+            fg_mask_pred = []
             for chunk_idx in range(N_rays_all//args.chunk + int(N_rays_all%args.chunk>0)):
 
                 xyz_coarse_sampled, rays_o, rays_d, z_vals = ray_marcher(rays[chunk_idx*args.chunk:(chunk_idx+1)*args.chunk],
@@ -187,13 +198,18 @@ for i_scene, scene in enum:#,8,21,103,114
                                                                                                           volume_feature, imgs_source, depth_map=None, **render_kwargs_train)
     
                 #print(torch.mean(rgb_bg))
-                
+                if 'neus' in args.net_type:
+                    fg_mask = extras['mask_fg']
+
                 rgb, depth_pred = torch.clamp(rgb.cpu(),0,1.0).numpy(), depth_pred.cpu().numpy()
+                fg_mask = torch.clamp(fg_mask.cpu(),0,1.0).numpy()
                 rgb_rays.append(rgb)
                 depth_rays_preds.append(depth_pred)
+                fg_mask_pred.append(fg_mask)
 
             
             depth_rays_preds = np.concatenate(depth_rays_preds).reshape(H, W)
+            fg_mask_pred = np.concatenate(fg_mask_pred).reshape(H, W)
 
             depth_gt, _ =  read_depth(f'/abyss/home/data/mvsnerf_dtu/mvs_training/dtu/Depths/scan{scene}/depth_map_{val_idx[i]:04d}.pfm')
         
@@ -216,10 +232,12 @@ for i_scene, scene in enum:#,8,21,103,114
                 imageio.imwrite(f'{save_dir}/scan{scene}_{val_idx[i]:03d}.png', img_vis.astype('uint8'))
             else:
                 rgbs.append(img_vis.astype('uint8'))
+
+            mask_error = mse(fg_mask_pred,mask_gt)
                 
             #TODO compute a depth loss from one or multiple directions? is already there maybe?
             #TODO compute not only mean but also standard deviation and median of losses
-            #TODO add measurement how well fore and background are differentiated between? is it possible? is foreground defined?
+            #TODO add measurement how well fore and background are differentiated between? is it possible? is foreground defined?  (add depth and mask loss)
             # quantity
             # mask background since they are outside the far boundle
             mask = depth==0
@@ -239,6 +257,7 @@ for i_scene, scene in enum:#,8,21,103,114
     if not save_as_image:
         imageio.mimwrite(f'{save_dir}/{scene}_spiral.mp4', np.stack(rgbs), fps=20, quality=10)
 
+print(f'============> ERROR <=================')
 a = np.mean(list(depth_acc['abs_err'].values()))
 b = np.mean(list(depth_acc[f'acc_l_{eval_metric[0]}'].values()))
 c = np.mean(list(depth_acc[f'acc_l_{eval_metric[1]}'].values()))
@@ -248,3 +267,14 @@ print(f'============> acc_l_{eval_metric[0]}: {b} <=================')
 print(f'============> acc_l_{eval_metric[1]}: {c} <=================')
 print(f'============> acc_l_{eval_metric[2]}: {d} <=================')
 print(f'=====> all mean psnr {np.mean(psnr_all)} ssim: {np.mean(ssim_all)} lpips: {np.mean(LPIPS_vgg_all)}') 
+
+print(f'============> VARIANCE <=================')
+a = np.var(list(depth_acc['abs_err'].values()))
+b = np.var(list(depth_acc[f'acc_l_{eval_metric[0]}'].values()))
+c = np.var(list(depth_acc[f'acc_l_{eval_metric[1]}'].values()))
+d = np.var(list(depth_acc[f'acc_l_{eval_metric[2]}'].values()))
+print(f'============> var abs_err: {a} <=================')
+print(f'============> var acc_l_{eval_metric[0]}: {b} <=================')
+print(f'============> var acc_l_{eval_metric[1]}: {c} <=================')
+print(f'============> var acc_l_{eval_metric[2]}: {d} <=================')
+print(f'=====> all var psnr {np.var(psnr_all)} ssim: {np.var(ssim_all)} lpips: {np.var(LPIPS_vgg_all)}') 

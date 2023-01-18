@@ -1318,6 +1318,7 @@ class MVSNeRF(nn.Module):
 def create_nerf_mvs(args, pts_embedder=True, use_mvs=False, dir_embedder=True, finetuning=False):
     """Instantiate mvs NeRF's MLP model.
     """
+    torch.manual_seed(0) # ensure the same random network initialization each run, though there is still randomness in the training procedure
 
     if pts_embedder:
         embed_fn, input_ch = get_embedder(args.multires, args.i_embed, input_dims=args.pts_dim)

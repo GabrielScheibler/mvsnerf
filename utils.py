@@ -1034,7 +1034,7 @@ def gen_pts_neus(rays_o, rays_d, imgs, volume_feature, pose_ref, near_far_target
     background_sampled_color = None
 
     inv_s = sdf_network.nerf.nerf_fg.deviation_network.forward(torch.ones([1]).cuda())
-    base_inv_s = inv_s // 2
+    base_inv_s = torch.div(inv_s, 2.0, rounding_mode='floor')
 
     # Up sample
     if n_importance > 0:
