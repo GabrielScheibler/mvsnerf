@@ -110,7 +110,8 @@ class MVSSystem(LightningModule):
     def decode_batch(self, batch):
         rays = batch['rays'].squeeze()  # (B, 8)
         rgbs = batch['rgbs'].squeeze()  # (B, 3)
-        return rays, rgbs
+        depths = batch['depth'].squeeze() # (B, 1)
+        return rays, rgbs, depths
 
     def unpreprocess(self, data, shape=(1,1,3,1,1)):
         # to unnormalize image for visualization
@@ -148,7 +149,7 @@ class MVSSystem(LightningModule):
 
     def training_step(self, batch, batch_nb):
 
-        rays, rgbs_target = self.decode_batch(batch)
+        rays, rgbs_target, rays_depth = self.decode_batch(batch)
 
         if args.use_density_volume and 0 == self.global_step%200:
             self.update_density_volume()
@@ -189,7 +190,27 @@ class MVSSystem(LightningModule):
             self.log('train/PSNR0', psnr0.item(), prog_bar=True)
 
         if 'inv_s' in extras:
-            self.log('train/inv_s', extras['inv_s'].item(), prog_bar=False)
+            self.log('train/inv_s', extras['inv_s'], prog_bar=False)
+
+        if self.args.with_depth:
+            mask = rays_depth > 0
+            if self.args.with_depth_loss:
+                depth_loss = self.loss(depth_pred, rays_depth, mask)
+                self.log('train/depth_loss', depth_loss.item(), prog_bar=True)
+                loss += depth_loss
+
+            abs_err = abs_error(depth_pred, rays_depth, mask).mean()
+            self.log('train/abs_err', abs_err, prog_bar=False)
+
+            if 'neus' in self.args.net_type:
+                mask_loss = torch.mean((mask.type(torch.DoubleTensor).detach().to(device) - extras['mask_fg'])**2)
+                self.log('train/mask_error', mask_loss.item(), prog_bar=False)
+                if self.args.with_mask_loss:
+                    if self.args.squared_mask_loss:
+                        mask_loss = mask_loss * mask_loss * 10
+                    mask_loss *= 1
+                    self.log('train/mask_loss', mask_loss.item(), prog_bar=True)
+                    loss += mask_loss
 
         ##################  rendering #####################
         if self.args.with_rgb_loss:
@@ -216,7 +237,7 @@ class MVSSystem(LightningModule):
     def validation_step(self, batch, batch_nb):
 
         self.MVSNet.train()
-        rays, img = self.decode_batch(batch)
+        rays, img, depth_gt = self.decode_batch(batch)
         img = img.cpu()  # (H, W, 3)
         # mask = batch['mask'][0]
 

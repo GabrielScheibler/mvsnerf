@@ -83,7 +83,7 @@ def run_network_mvs(pts, viewdirs, alpha_feat, fn, embed_fn, embeddirs_fn, netch
     outputs = torch.reshape(outputs_flat, list(pts.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
 
-def raw2outputs(raw, z_vals, dists, white_bkgd=False, net_type='v2'):
+def raw2outputs(raw, z_vals, dists, white_bkgd=False, net_type='v2',inside_sphere=None):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -105,12 +105,30 @@ def raw2outputs(raw, z_vals, dists, white_bkgd=False, net_type='v2'):
     rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3]
     depth_map = torch.sum(weights * z_vals, -1)
 
+    weights_bg1 = weights.masked_fill(torch.logical_or(inside_sphere, inside_sphere),0)
+    weights_fg1 = weights.masked_fill(torch.logical_not(inside_sphere),0)
+    weights_fg1 = torch.sum(weights_fg1, dim=1)
+    weights_bg1 = torch.sum(weights_bg1, dim=1)
+    mask_fg = (weights_fg1 - weights_bg1) / (weights_fg1 + weights_bg1 + 1e-10)
+    mask_fg = 0.5 * mask_fg + 0.5
+
+    # calculating cast depth map weights to get a depth map that shows depth of the first intersection similar to ray casting
+    alpha_threshold = 0.5
+    cdmw = torch.cumprod((alpha[:,:-1] <= alpha_threshold), dim=-1)
+    zeros = torch.zeros(cdmw.size(dim=0),1,device=device)
+    ones = torch.ones(cdmw.size(dim=0),1,device=device)
+    cdmw1 = torch.cat((cdmw,zeros),dim=1)
+    cdmw2 = torch.cat((ones,cdmw),dim=1)
+    cdmw = cdmw1 - cdmw2
+    cdmw = cdmw * -1
+    cast_depth_map = torch.sum(cdmw * z_vals, -1) / (torch.sum(cdmw, -1) + 1e-10)
+
     disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map, device=device), depth_map / torch.sum(weights, -1))
     acc_map = torch.sum(weights, -1)
 
     if white_bkgd:
         rgb_map = rgb_map + (1. - acc_map[..., None])
-    return rgb_map, disp_map, acc_map, weights, depth_map, alpha
+    return rgb_map, disp_map, acc_map, weights, depth_map, cast_depth_map, alpha, mask_fg
 
 def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, near_background, white_bkgd=False, net_type='v2'):
     """Transforms model's predictions to semantically meaningful values.
@@ -136,6 +154,17 @@ def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, near_backgrou
 
     rgb_map = torch.sum(weights_fg[..., None] * rgb_fg, -2) + torch.sum(weights_bg[..., None] * rgb_bg, -2) # [N_rays, 3]
     depth_map = torch.sum(weights_fg * z_vals, -1) + torch.sum(weights_bg * z_vals, -1) / (torch.sum(weights_fg, -1) + torch.sum(weights_bg, -1) + 1e-10)
+    
+    # calculating cast depth map weights to get a depth map that shows depth of the first intersection similar to ray casting
+    alpha_threshold = 0.5
+    cdmw = torch.cumprod((alpha[:,:-1] <= alpha_threshold), dim=-1)
+    zeros = torch.zeros(cdmw.size(dim=0),1,device=device)
+    ones = torch.ones(cdmw.size(dim=0),1,device=device)
+    cdmw1 = torch.cat((cdmw,zeros),dim=1)
+    cdmw2 = torch.cat((ones,cdmw),dim=1)
+    cdmw = cdmw1 - cdmw2
+    cdmw = cdmw * -1
+    cast_depth_map = torch.sum(cdmw * z_vals, -1) / (torch.sum(cdmw, -1) + 1e-10)
 
     disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map, device=device), depth_map)
     acc_map = torch.sum(weights_fg, -1) + torch.sum(weights_bg, -1)
@@ -149,7 +178,7 @@ def raw2outputs_neus(raw_fg, raw_bg, z_vals, dists, inside_sphere, near_backgrou
 
     if white_bkgd:
         rgb_map = rgb_map + (1. - acc_map[..., None])
-    return rgb_map, disp_map, acc_map, weights, depth_map, alpha, mask_fg
+    return rgb_map, disp_map, acc_map, weights, depth_map, cast_depth_map, alpha, mask_fg
 
 def transform_raw_neus(raw, pts, dirs, cos_anneal_ratio):
     # Section length
@@ -265,8 +294,11 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
 
         pts_norm = torch.linalg.norm(rays_pts, ord=2, dim=-1)
         inside_sphere = (pts_norm < 1.0).float().detach()
-        nis = 1 - inside_sphere
-        near_background = torch.cumprod(nis, dim=-1)
+        #nis = 1 - inside_sphere
+        #near_background = torch.cumprod(nis, dim=-1)
+        #near_background_2 = torch.sum(rays_pts * rays_dir,dim=-1) < 0
+        #near_background = torch.logical_and(near_background,near_background_2)
+        near_background = torch.zeros_like(inside_sphere)
 
         raw_bg = network_query_fn(rays_pts_ndc, angle, input_feat, network_fn.forward_bg)
         raw_fg_alpha = network_query_fn(input_pts, input_dir, input_feat, network_fn.forward_fg)
@@ -278,9 +310,9 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
 
         dists = depth2dist(depth_candidates, cos_angle)
         # dists = ndc2dist(rays_ndc)
-        rgb_map, disp_map, acc_map, weights, depth_map, alpha, mask_fg = raw2outputs_neus(raw_fg, raw_bg, depth_candidates, dists, inside_sphere, near_background, white_bkgd, args.net_type)
-        rgb_fg, _, _, _, _, _, _ = raw2outputs_neus(raw_fg, torch.zeros_like(raw_bg), depth_candidates, dists, inside_sphere, near_background, white_bkgd, args.net_type)
-        rgb_bg, _, _, _, _, _, _ = raw2outputs_neus(torch.zeros_like(raw_fg), raw_bg, depth_candidates, dists, inside_sphere, near_background, white_bkgd, args.net_type)
+        rgb_map, disp_map, acc_map, weights, depth_map, cast_depth_map, alpha, mask_fg = raw2outputs_neus(raw_fg, raw_bg, depth_candidates, dists, inside_sphere, near_background, white_bkgd, args.net_type)
+        rgb_fg, _, _, _, _, _, _, _ = raw2outputs_neus(raw_fg, torch.zeros_like(raw_bg), depth_candidates, dists, inside_sphere, near_background, white_bkgd, args.net_type)
+        rgb_bg, _, _, _, _, _, _, _ = raw2outputs_neus(torch.zeros_like(raw_fg), raw_bg, depth_candidates, dists, inside_sphere, near_background, white_bkgd, args.net_type)
         
         #debug
         if(torch.any(torch.isnan(rgb_fg))):
@@ -289,7 +321,7 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
             raise SystemExit("rgb_bg contained a nan value")
         
         
-        ret = {'inv_s' : inv_s, 'mask_fg' : mask_fg}
+        ret = {'inv_s' : inv_s, 'mask_fg' : mask_fg, 'cast_depth_map' : cast_depth_map}
         return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_fg, rgb_bg, sdf_gradient_error
 
 
@@ -299,10 +331,14 @@ def rendering(args, pose_ref, rays_pts, rays_pts_ndc, depth_candidates, rays_o, 
 
     dists = depth2dist(depth_candidates, cos_angle)
     # dists = ndc2dist(rays_ndc)
-    rgb_map, disp_map, acc_map, weights, depth_map, alpha = raw2outputs(raw, depth_candidates, dists, white_bkgd,args.net_type)
-    ret = {}
+    pts_norm = torch.linalg.norm(rays_pts, ord=2, dim=-1)
+    inside_sphere = (pts_norm < 1.0).float().detach()
+    
+    rgb_map, disp_map, acc_map, weights, depth_map, cast_depth_map, alpha, mask_fg = raw2outputs(raw, depth_candidates, dists, white_bkgd,args.net_type, inside_sphere)
+    inv_s = 0
+    ret = {'inv_s' : inv_s, 'mask_fg' : mask_fg, 'cast_depth_map' : cast_depth_map}
 
-    return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_map, rgb_map, torch.ones_like(rays_pts).cuda()
+    return rgb_map, input_feat, weights, depth_map, alpha, ret, rgb_map, torch.zeros_like(rgb_map).cuda(), torch.ones_like(rays_pts).cuda()
 
 def mesh_rendering(args, pose_ref, rays_pts, rays_pts_ndc, inv_scale,
               volume_feature=None, imgs=None, depth_map=None, network_fn=None, img_feat=None, network_query_fn=None, white_bkgd=False, **kwargs):

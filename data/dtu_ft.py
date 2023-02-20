@@ -195,7 +195,7 @@ class DTU_ft(Dataset):
             img = img.view(3, -1).permute(1, 0)  # (h*w, 3) RGBA
             self.all_rgbs += [img]
 
-            if os.path.exists(depth_filename) and self.split!='train':
+            if os.path.exists(depth_filename):
                 depth = self.read_depth(depth_filename)
                 depth *= self.scale_factor
                 self.all_depth += [torch.from_numpy(depth).float().view(-1,1)]
@@ -216,6 +216,7 @@ class DTU_ft(Dataset):
         if 'train' == self.split:
             self.all_rays = torch.cat(self.all_rays, 0)  # (len(self.meta['frames])*h*w, 3)
             self.all_rgbs = torch.cat(self.all_rgbs, 0)  # (len(self.meta['frames])*h*w, 3)
+            self.all_depth = torch.cat(self.all_depth, 0)  # (len(self.meta['frames])*h*w, 3)
         else:
             self.all_rays = torch.stack(self.all_rays, 0)  # (len(self.meta['frames]),h*w, 3)
             self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1,*self.img_wh[::-1], 3)  # (len(self.meta['frames]),h,w,3)
@@ -235,7 +236,8 @@ class DTU_ft(Dataset):
 
 
             sample = {'rays': self.all_rays[idx],
-                      'rgbs': self.all_rgbs[idx]}
+                      'rgbs': self.all_rgbs[idx],
+                      'depth': self.all_depth[idx]}
 
         else:  # create data for each image separately
 

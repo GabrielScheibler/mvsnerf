@@ -69,22 +69,25 @@ def acc_threshold(abs_err, threshold):
 
 def mse(x,gt,mask=None):
     if mask==None:
-        mask = np.ones_like(x)
+        mask = np.ones_like(x).astype(bool)
     return np.mean((x[mask] - gt[mask])**2)
 
 def mae(x,gt,mask=None):
     if mask==None:
-        mask = np.ones_like(x)
+        mask = np.ones_like(x).astype(bool)
     return np.mean(np.abs(x[mask] - gt[mask]))
 
-psnr_all,ssim_all,LPIPS_vgg_all = [],[],[]
+psnr_everywhere_all,ssim_everywhere_all,LPIPS_everywhere_vgg_all = [],[],[]
+psnr_in_all,ssim_in_all,LPIPS_in_vgg_all = [],[],[]
+psnr_out_all,ssim_out_all,LPIPS_out_vgg_all = [],[],[]
+mask_error_all = []
+
 depth_acc = {}
 eval_metric = [0.1,0.05,0.01]
-depth_acc[f'abs_err'],depth_acc[f'acc_l_{eval_metric[0]}'],depth_acc[f'acc_l_{eval_metric[1]}'],depth_acc[f'acc_l_{eval_metric[2]}'] = {},{},{},{}
+depth_acc[f'abs_err'],depth_acc[f'acc_l_{eval_metric[0]}'],depth_acc[f'acc_l_{eval_metric[1]}'],depth_acc[f'acc_l_{eval_metric[2]}'],depth_acc[f'cast_abs_err'] = {},{},{},{},{}
 
-create_mesh = True
 is_finetuned = False
-scene = 1
+scene = 114
 
 enum = enumerate([1,8,21,103,114])
 
@@ -92,10 +95,13 @@ if is_finetuned:
     enum = enumerate([scene])
 
 for i_scene, scene in enum:#,8,21,103,114
-    psnr,ssim,LPIPS_vgg,rgbs = [],[],[],[]
+    rgbs = []
+    psnr_everywhere, ssim_everywhere,LPIPS_everywhere_vgg = [],[],[]
+    psnr_in, ssim_in,LPIPS_in_vgg = [],[],[]
+    psnr_out, ssim_out,LPIPS_out_vgg = [],[],[]
     cmd = f'--datadir /abyss/home/data/mvsnerf_dtu/mvs_training/dtu/scan{scene}  \
      --dataset_name dtu_ft  \
-     --net_type neus --ckpt ./ckpts//latest.tar --with_depth --with_depth_map'
+     --net_type neus --ckpt ./ckpts//latest.tar --with_depth --neus_sampling'
 
     args = config_parser(cmd.split())
     args.use_viewdirs = True
@@ -161,6 +167,9 @@ for i_scene, scene in enum:#,8,21,103,114
             imgs_source, proj_mats, near_far_source, pose_source = dataset_train.read_source_views(pair_idx=pair_idx,device=device)
             volume_feature, _, _ = MVSNet(imgs_source, proj_mats, near_far_source, pad=pad)
             imgs_source = unpreprocess(imgs_source)
+            depth_map_input = None
+            if args.with_depth_map:
+                depth_map_input = pose_source['depths'].unsqueeze(0)
 
             if is_finetuned:   
                 imgs_source, proj_mats, near_far_source, pose_source = dataset_train.read_source_views(device=device)
@@ -170,8 +179,11 @@ for i_scene, scene in enum:#,8,21,103,114
                 pad = 24
         
             N_rays_all = rays.shape[0]
+            rgb_fg_rays, rgb_bg_rays = [],[]
             rgb_rays, depth_rays_preds = [],[]
+            cast_depth_rays_preds = []
             fg_mask_pred = []
+            mask_error = []
             for chunk_idx in range(N_rays_all//args.chunk + int(N_rays_all%args.chunk>0)):
 
                 xyz_coarse_sampled, rays_o, rays_d, z_vals = ray_marcher(rays[chunk_idx*args.chunk:(chunk_idx+1)*args.chunk],
@@ -179,7 +191,7 @@ for i_scene, scene in enum:#,8,21,103,114
 
                 if('neus' in args.net_type and args.neus_sampling):
                     xyz_coarse_sampled, z_vals, _ = gen_pts_neus(
-                        rays_o, rays_d, imgs_source, volume_feature, pose_source, near_far_source, args, False, render_kwargs_train["network_fn"], render_kwargs_train["network_query_fn"], depth_map=depth)
+                        rays_o, rays_d, imgs_source, volume_feature, pose_source, near_far_source, args, False, render_kwargs_train["network_fn"], render_kwargs_train["network_query_fn"], depth_map=depth_map_input)
 
 
 
@@ -195,63 +207,93 @@ for i_scene, scene in enum:#,8,21,103,114
                 # rendering
                 rgb, disp, acc, depth_pred, alpha, extras, rgb_fg, rgb_bg, sdf_gradient_error = rendering(args, pose_source, xyz_coarse_sampled,
                                                                                                           xyz_NDC, z_vals, rays_o, rays_d, inv_scale, cos_anneal_ratio,
-                                                                                                          volume_feature, imgs_source, depth_map=None, **render_kwargs_train)
+                                                                                                          volume_feature, imgs_source, depth_map=depth_map_input, **render_kwargs_train)
     
                 #print(torch.mean(rgb_bg))
-                if 'neus' in args.net_type:
-                    fg_mask = extras['mask_fg']
+                fg_mask = extras['mask_fg']
+                cast_depth_pred = extras['cast_depth_map'].cpu().numpy()
 
+                rgb_fg, rgb_bg = torch.clamp(rgb_fg.cpu(),0,1.0).numpy(),torch.clamp(rgb_bg.cpu(),0,1.0).numpy()
                 rgb, depth_pred = torch.clamp(rgb.cpu(),0,1.0).numpy(), depth_pred.cpu().numpy()
                 fg_mask = torch.clamp(fg_mask.cpu(),0,1.0).numpy()
+                rgb_fg_rays.append(rgb_fg)
+                rgb_bg_rays.append(rgb_bg)
                 rgb_rays.append(rgb)
                 depth_rays_preds.append(depth_pred)
+                cast_depth_rays_preds.append(cast_depth_pred)
                 fg_mask_pred.append(fg_mask)
 
             
             depth_rays_preds = np.concatenate(depth_rays_preds).reshape(H, W)
+            cast_depth_rays_preds = np.concatenate(cast_depth_rays_preds).reshape(H, W)
             fg_mask_pred = np.concatenate(fg_mask_pred).reshape(H, W)
 
             depth_gt, _ =  read_depth(f'/abyss/home/data/mvsnerf_dtu/mvs_training/dtu/Depths/scan{scene}/depth_map_{val_idx[i]:04d}.pfm')
         
             mask_gt = depth_gt>0
-            abs_err = abs_error(depth_rays_preds, depth_gt/200, mask_gt)
+            abs_err = abs_error(depth_rays_preds, depth_gt/246.40544, mask_gt)
+            cast_abs_err = abs_error(cast_depth_rays_preds, depth_gt/246.40544, mask_gt)
 
             eval_metric = [0.01,0.05, 0.1]
             depth_acc[f'abs_err'][f'{scene}'] = np.mean(abs_err)
             depth_acc[f'acc_l_{eval_metric[0]}'][f'{scene}'] = acc_threshold(abs_err,eval_metric[0]).mean()
             depth_acc[f'acc_l_{eval_metric[1]}'][f'{scene}'] = acc_threshold(abs_err,eval_metric[1]).mean()
             depth_acc[f'acc_l_{eval_metric[2]}'][f'{scene}'] = acc_threshold(abs_err,eval_metric[2]).mean()
+            depth_acc[f'cast_abs_err'][f'{scene}'] = np.mean(cast_abs_err)
 
             
             depth_rays_preds, _ = visualize_depth_numpy(depth_rays_preds, near_far_source)
             
+            rgb_fg_rays = np.concatenate(rgb_fg_rays).reshape(H, W, 3)
+            rgb_bg_rays = np.concatenate(rgb_bg_rays).reshape(H, W, 3)
             rgb_rays = np.concatenate(rgb_rays).reshape(H, W, 3)
-            img_vis = np.concatenate((img*255,rgb_rays*255,depth_rays_preds),axis=1)
+            img_vis = np.concatenate((img*255,rgb_rays*255,rgb_fg_rays*255,rgb_bg_rays*255,depth_rays_preds),axis=1)
             
             if save_as_image:
                 imageio.imwrite(f'{save_dir}/scan{scene}_{val_idx[i]:03d}.png', img_vis.astype('uint8'))
             else:
                 rgbs.append(img_vis.astype('uint8'))
 
-            mask_error = mse(fg_mask_pred,mask_gt)
+            mask_error.append(mse(fg_mask_pred,mask_gt))
                 
-            #TODO compute a depth loss from one or multiple directions? is already there maybe?
-            #TODO compute not only mean but also standard deviation and median of losses
             #TODO add measurement how well fore and background are differentiated between? is it possible? is foreground defined?  (add depth and mask loss)
             # quantity
             # mask background since they are outside the far boundle
             mask = depth==0
             imageio.imwrite(f'{save_dir}/scan{scene}_{val_idx[i]:03d}_mask.png', mask.astype('uint8')*255)
-            rgb_rays[mask],img[mask] = 0.0,0.0
-            psnr.append( mse2psnr(np.mean((rgb_rays[~mask]-img[~mask])**2)))
-            ssim.append( structural_similarity(rgb_rays, img, multichannel=True))
+            psnr_everywhere.append( mse2psnr(np.mean((rgb_rays-img)**2)))
+            ssim_everywhere.append( structural_similarity(rgb_rays, img, multichannel=True))
+            rgb_rays_in,img_in = np.copy(rgb_rays),np.copy(img)
+            rgb_rays_in[mask],img_in[mask] = 0.0,0.0
+            psnr_in.append( mse2psnr(np.mean((rgb_rays_in[~mask]-img_in[~mask])**2)))
+            ssim_in.append( structural_similarity(rgb_rays_in, img_in, multichannel=True))
+            rgb_rays_out,img_out = np.copy(rgb_rays),np.copy(img)
+            rgb_rays_out[~mask],img_out[~mask] = 0.0,0.0
+            psnr_out.append( mse2psnr(np.mean((rgb_rays_out[mask]-img_out[mask])**2)))
+            ssim_out.append( structural_similarity(rgb_rays_out, img_out, multichannel=True))
             
             img_tensor = torch.from_numpy(rgb_rays)[None].permute(0,3,1,2).float()*2-1.0 # image should be RGB, IMPORTANT: normalized to [-1,1]
             img_gt_tensor = torch.from_numpy(img)[None].permute(0,3,1,2).float()*2-1.0
-            LPIPS_vgg.append( loss_fn_vgg(img_tensor, img_gt_tensor).item())
+            LPIPS_everywhere_vgg.append( loss_fn_vgg(img_tensor, img_gt_tensor).item())
+            img_tensor = torch.from_numpy(rgb_rays_in)[None].permute(0,3,1,2).float()*2-1.0 # image should be RGB, IMPORTANT: normalized to [-1,1]
+            img_gt_tensor = torch.from_numpy(img_in)[None].permute(0,3,1,2).float()*2-1.0
+            LPIPS_in_vgg.append( loss_fn_vgg(img_tensor, img_gt_tensor).item())
+            img_tensor = torch.from_numpy(rgb_rays_out)[None].permute(0,3,1,2).float()*2-1.0 # image should be RGB, IMPORTANT: normalized to [-1,1]
+            img_gt_tensor = torch.from_numpy(img_out)[None].permute(0,3,1,2).float()*2-1.0
+            LPIPS_out_vgg.append( loss_fn_vgg(img_tensor, img_gt_tensor).item())
 
-        print(f'=====> scene: {scene} mean psnr {np.mean(psnr)} ssim: {np.mean(ssim)} lpips: {np.mean(LPIPS_vgg)}')   
-        psnr_all.append(psnr);ssim_all.append(ssim);LPIPS_vgg_all.append(LPIPS_vgg)
+            
+
+        print(f'=====> scene: {scene} mean psnr {np.mean(psnr_everywhere)} ssim: {np.mean(ssim_everywhere)} lpips: {np.mean(LPIPS_everywhere_vgg)}')   
+        psnr_everywhere_all.append(psnr_everywhere);ssim_everywhere_all.append(ssim_everywhere);LPIPS_everywhere_vgg_all.append(LPIPS_everywhere_vgg)
+        print(f'=====> scene: {scene} mean psnr in {np.mean(psnr_in)} ssim: {np.mean(ssim_in)} lpips: {np.mean(LPIPS_in_vgg)}')   
+        psnr_in_all.append(psnr_in);ssim_in_all.append(ssim_in);LPIPS_in_vgg_all.append(LPIPS_in_vgg)
+        print(f'=====> scene: {scene} mean psnr out {np.mean(psnr_out)} ssim: {np.mean(ssim_out)} lpips: {np.mean(LPIPS_out_vgg)}')   
+        psnr_out_all.append(psnr_out);ssim_out_all.append(ssim_out);LPIPS_out_vgg_all.append(LPIPS_out_vgg)
+        print(f'=====> scene: {scene} mean mask_error {np.mean(mask_error)}') 
+        mask_error_all.append(mask_error)
+        print(f'=====> scene: {scene} mean depth_error {np.mean(depth_acc[f"abs_err"][f"{scene}"])}')
+        print(f'=====> scene: {scene} mean dcast_epth_error {np.mean(depth_acc[f"cast_abs_err"][f"{scene}"])}') 
         
 
     if not save_as_image:
@@ -262,19 +304,29 @@ a = np.mean(list(depth_acc['abs_err'].values()))
 b = np.mean(list(depth_acc[f'acc_l_{eval_metric[0]}'].values()))
 c = np.mean(list(depth_acc[f'acc_l_{eval_metric[1]}'].values()))
 d = np.mean(list(depth_acc[f'acc_l_{eval_metric[2]}'].values()))
+e = np.mean(list(depth_acc['cast_abs_err'].values()))
 print(f'============> abs_err: {a} <=================')
 print(f'============> acc_l_{eval_metric[0]}: {b} <=================')
 print(f'============> acc_l_{eval_metric[1]}: {c} <=================')
 print(f'============> acc_l_{eval_metric[2]}: {d} <=================')
-print(f'=====> all mean psnr {np.mean(psnr_all)} ssim: {np.mean(ssim_all)} lpips: {np.mean(LPIPS_vgg_all)}') 
+print(f'============> cast_abs_err: {e} <=================')
+print(f'=====> all mean psnr_everywhere {np.mean(psnr_everywhere_all)} ssim: {np.mean(ssim_everywhere_all)} lpips: {np.mean(LPIPS_everywhere_vgg_all)}') 
+print(f'=====> all mean psnr_in {np.mean(psnr_in_all)} ssim: {np.mean(ssim_in_all)} lpips: {np.mean(LPIPS_in_vgg_all)}') 
+print(f'=====> all mean psnr_out {np.mean(psnr_out_all)} ssim: {np.mean(ssim_out_all)} lpips: {np.mean(LPIPS_out_vgg_all)}') 
+print(f'=====> all mean mask_error {np.mean(mask_error_all)}') 
 
 print(f'============> VARIANCE <=================')
 a = np.var(list(depth_acc['abs_err'].values()))
 b = np.var(list(depth_acc[f'acc_l_{eval_metric[0]}'].values()))
 c = np.var(list(depth_acc[f'acc_l_{eval_metric[1]}'].values()))
 d = np.var(list(depth_acc[f'acc_l_{eval_metric[2]}'].values()))
+e = np.var(list(depth_acc['cast_abs_err'].values()))
 print(f'============> var abs_err: {a} <=================')
 print(f'============> var acc_l_{eval_metric[0]}: {b} <=================')
 print(f'============> var acc_l_{eval_metric[1]}: {c} <=================')
 print(f'============> var acc_l_{eval_metric[2]}: {d} <=================')
-print(f'=====> all var psnr {np.var(psnr_all)} ssim: {np.var(ssim_all)} lpips: {np.var(LPIPS_vgg_all)}') 
+print(f'============> var cast_abs_err: {e} <=================')
+print(f'=====> all var psnr_everywhere {np.var(psnr_everywhere_all)} ssim: {np.var(ssim_everywhere_all)} lpips: {np.var(LPIPS_everywhere_vgg_all)}') 
+print(f'=====> all var psnr_in {np.var(psnr_in_all)} ssim: {np.var(ssim_in_all)} lpips: {np.var(LPIPS_in_vgg_all)}') 
+print(f'=====> all var psnr_out {np.var(psnr_out_all)} ssim: {np.var(ssim_out_all)} lpips: {np.var(LPIPS_out_vgg_all)}')
+print(f'=====> all var mask_error {np.var(mask_error_all)}') 

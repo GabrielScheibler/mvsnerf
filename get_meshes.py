@@ -228,7 +228,7 @@ for i_scene, scene in enum:#,8,21,103,114
 
                 sdf[outside_sphere] = 1.0
 
-                threshold = threshold = [0.0]
+                threshold = [0.0]
 
                 sdf = sdf.reshape([resolution,resolution,resolution])
                 sdf = sdf.cpu().detach().numpy()

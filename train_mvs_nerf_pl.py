@@ -176,6 +176,11 @@ class MVSSystem(LightningModule):
 
         ##################  rendering #####################
         img_loss = img2mse(rgb, target_s)
+        # rgb_l = rgb
+        # rgb_l[~mask] = 0
+        # target_l = target_s
+        # target_l[~mask] = 0
+        # img_loss = img2mse(rgb_l, target_l)
         loss = loss + img_loss
 
         if 'neus' in self.args.net_type:
